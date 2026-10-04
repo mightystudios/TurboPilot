@@ -389,6 +389,21 @@ internal static class UiChecks
 			chat.AddNotice($"binary-prefix{(char)0}{(char)2}{(char)26}{renderedRestoreSentinel}\r\n");
 			var sessionId = chat.SessionId!;
 			await window.EndSessionAsync();
+			string refreshedStandard = workspace.Write(
+				"current\\copilot-instructions.md", "REFRESHED_STANDARD_INSTRUCTION");
+			library.Instructions[refreshedStandard] = new()
+			{
+				FilePath = refreshedStandard,
+				Name = "refreshed-standard",
+				IsCliStandard = true,
+			};
+			string newerTurboPilotInstruction = workspace.Write(
+				"current\\instructions\\additional.instructions.md", "NEW_TURBOPILOT_INSTRUCTION");
+			library.Instructions[newerTurboPilotInstruction] = new()
+			{
+				FilePath = newerTurboPilotInstruction,
+				Name = "new-turbopilot",
+			};
 			var displayedAtEnd = window.OutputText;
 			await Task.Run(() => Invoke(window, "ForActiveChat", chat, new Action(() => window.AppendOutput("STALE_EVENT_SENTINEL"))));
 			await window.Dispatcher.InvokeAsync(() => { }, DispatcherPriority.ApplicationIdle);
@@ -404,6 +419,10 @@ internal static class UiChecks
 				"The Past Sessions menu did not resume the selected session.", timeoutSeconds: 45);
 			Check.Equal(sessionId, Field<ChatService>(window, "_chat").SessionId, "Resume the selected ID in the main window");
 			Check.True(window.OutputText.Contains("UI streaming reply"), "Recall earlier output in both tabs.");
+			var resumedInstructions = Field<ChatService>(window, "_chat").Options.Customizations.Instructions;
+			Check.True(resumedInstructions.ContainsKey(refreshedStandard)
+				&& !resumedInstructions.ContainsKey(newerTurboPilotInstruction),
+				"Refresh standard CLI instructions on resume without replacing saved TurboPilot additions.");
 			await CheckTranscriptOpenedAtTopAsync(window, webView, "Resuming saved history", renderedRestoreSentinel);
 			Console.WriteLine("PASS failed-send recovery, stale-event isolation, Past Sessions viewing, and UI resume at the transcript start");
 

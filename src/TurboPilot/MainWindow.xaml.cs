@@ -1019,14 +1019,16 @@ public partial class MainWindow : TurbolandWindow
 		SetSessionActive(IsSessionActive);
 		try
 		{
-			// A resume arrives carrying the lists its session ran with, and
-			// those stand. Anything else scans the roots afresh for the
-			// workspace it is about to open.
+			// A resume keeps its saved TurboPilot-specific lists but refreshes
+			// the standard instruction files. A new session uses the full
+			// current scan.
+			var currentCustomizations = _collectCustomizations(options.WorkspaceFolder).Clone();
 			options = options with
 			{
-				Customizations = (resumeId is not null && options.Customizations.HasItems
-					? options.Customizations
-					: _collectCustomizations(options.WorkspaceFolder)).Clone(),
+				Customizations = resumeId is not null && options.Customizations.HasItems
+					? CustomizationService.RefreshStandardInstructions(
+						options.Customizations, currentCustomizations, options.WorkspaceFolder)
+					: currentCustomizations,
 			};
 			await EndChatCoreAsync();
 			cancellation.Token.ThrowIfCancellationRequested();

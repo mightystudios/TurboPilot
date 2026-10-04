@@ -34,6 +34,13 @@ public sealed class CustomizationItem
 	/// </summary>
 	public bool Enabled { get; set; } = true;
 
+	/// <summary>
+	/// Whether the CLI discovers this instruction without a TurboPilot-specific
+	/// customization folder. Current standard instructions refresh when a
+	/// saved session resumes.
+	/// </summary>
+	public bool IsCliStandard { get; set; }
+
 	/// <summary>Independent copy, so edits can be staged and discarded.</summary>
 	public CustomizationItem Clone() => new()
 	{
@@ -41,5 +48,6 @@ public sealed class CustomizationItem
 		Element = Element,
 		Name = Name,
 		Enabled = Enabled,
+		IsCliStandard = IsCliStandard,
 	};
 }

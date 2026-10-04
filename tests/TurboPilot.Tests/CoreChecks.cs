@@ -17,6 +17,7 @@ internal static class CoreChecks
 	public static async Task RunAsync()
 	{
 		CheckConfiguration();
+		CheckCustomizationDiscovery();
 		CheckApplicationInstructions();
 		CheckExternalTools();
 		CheckWorkspaceReadme();
@@ -33,6 +34,155 @@ internal static class CoreChecks
 		await CheckToolRowsAsync();
 		CheckHistoryAndStatus();
 		Console.WriteLine("PASS configuration, history storage, questions, streaming events, tool rows, usage, prompt navigation, and external tools");
+	}
+
+	private static void CheckCustomizationDiscovery()
+	{
+		using var workspace = new TestWorkspace();
+		string copilotHome = Path.Combine(workspace.Root, "copilot-home");
+		string cliDirectory = Path.Combine(workspace.Root, "cli-instructions");
+		string additional = Path.Combine(workspace.Root, "additional");
+		Directory.CreateDirectory(Path.Combine(workspace.Workspace, ".git"));
+		string currentDirectory = Path.Combine(workspace.Workspace, "src", "feature");
+		Directory.CreateDirectory(currentDirectory);
+		string personal = workspace.Write(
+			"copilot-home\\copilot-instructions.md", "PERSONAL_COPILOT_INSTRUCTION");
+		string personalModular = workspace.Write(
+			"copilot-home\\instructions\\nested\\personal.instructions.md",
+			"---\napplyTo: '**/*.cs'\n---\nPERSONAL_MODULAR_INSTRUCTION");
+		string repository = workspace.Write(
+			"workspace\\.github\\copilot-instructions.md", "REPOSITORY_COPILOT_INSTRUCTION");
+		string repositoryModular = workspace.Write(
+			"workspace\\.github\\instructions\\nested\\repository.instructions.md",
+			"---\napplyTo: '**/*.xaml'\n---\nREPOSITORY_MODULAR_INSTRUCTION");
+		string agents = workspace.Write("workspace\\AGENTS.md", "WORKSPACE_AGENTS_INSTRUCTION");
+		string rootClaude = workspace.Write("workspace\\CLAUDE.md", "WORKSPACE_CLAUDE_INSTRUCTION");
+		string claude = workspace.Write("workspace\\.claude\\CLAUDE.md", "WORKSPACE_CLAUDE_INSTRUCTION");
+		string intermediateAgents = workspace.Write(
+			"workspace\\src\\AGENTS.md", "INTERMEDIATE_AGENTS_INSTRUCTION");
+		string currentCanonical = workspace.Write(
+			"workspace\\src\\feature\\.github\\copilot-instructions.md",
+			"CURRENT_COPILOT_INSTRUCTION");
+		string currentModular = workspace.Write(
+			"workspace\\src\\feature\\.github\\instructions\\current.instructions.md",
+			"CURRENT_MODULAR_INSTRUCTION");
+		string gemini = workspace.Write(
+			"workspace\\src\\feature\\GEMINI.md", "CURRENT_GEMINI_INSTRUCTION");
+		string cliAgents = workspace.Write("cli-instructions\\nested\\AGENTS.md", "CLI_DIRECTORY_AGENTS_INSTRUCTION");
+		string cliModular = workspace.Write(
+			"cli-instructions\\nested\\cli.instructions.md", "CLI_DIRECTORY_MODULAR_INSTRUCTION");
+		string additionalCanonical = workspace.Write(
+			"additional\\copilot-instructions.md", "ADDITIONAL_COPILOT_INSTRUCTION");
+		string additionalModular = workspace.Write(
+			"additional\\instructions\\nested\\additional.instructions.md",
+			"ADDITIONAL_MODULAR_INSTRUCTION");
+		workspace.Write("cli-instructions\\ignored.md", "IGNORED_MARKDOWN");
+
+		string? originalHome = Environment.GetEnvironmentVariable("COPILOT_HOME");
+		string? originalDirectories = Environment.GetEnvironmentVariable("COPILOT_CUSTOM_INSTRUCTIONS_DIRS");
+		try
+		{
+			Environment.SetEnvironmentVariable("COPILOT_HOME", copilotHome);
+			Environment.SetEnvironmentVariable("COPILOT_CUSTOM_INSTRUCTIONS_DIRS", cliDirectory);
+			var previous = new CustomizationLibrary();
+			previous.Instructions[personal] = new()
+			{
+				FilePath = personal,
+				Name = "copilot-instructions",
+				Enabled = false,
+			};
+
+			var library = CustomizationService.Preview(
+				currentDirectory, [additional], previous);
+			string[] standard =
+			[
+				personal,
+				personalModular,
+				repository,
+				repositoryModular,
+				agents,
+				rootClaude,
+				claude,
+				intermediateAgents,
+				currentCanonical,
+				currentModular,
+				gemini,
+				cliAgents,
+				cliModular,
+			];
+			string[] additionalOnly =
+			[
+				additionalCanonical,
+				additionalModular,
+			];
+			string[] expected = [.. standard, .. additionalOnly];
+			Check.True(expected.All(library.Instructions.ContainsKey),
+				"Discover every Copilot CLI instruction location plus TurboPilot's additional roots: "
+				+ string.Join(", ", expected.Where(path => !library.Instructions.ContainsKey(path))));
+			Check.True(!library.Instructions[personal].Enabled,
+				"Carry a user's enabled state onto a canonical Copilot instruction.");
+			Check.True(standard.All(path => library.Instructions[path].IsCliStandard)
+				&& additionalOnly.All(path => !library.Instructions[path].IsCliStandard),
+				"Distinguish Copilot CLI's standard files from TurboPilot-only search roots.");
+			Check.True(!library.Instructions.Keys.Any(path => path.EndsWith("ignored.md", StringComparison.OrdinalIgnoreCase)),
+				"Do not treat arbitrary Markdown in a custom instruction directory as instructions.");
+			Check.Equal(copilotHome,
+				CustomizationService.GetSearchRoots(currentDirectory, [additional]).First(),
+				"COPILOT_HOME replaces the default personal customization root.");
+
+			var config = new SessionConfig();
+			SessionConfiguration.Apply(config,
+				new ChatSessionOptions { WorkspaceFolder = currentDirectory, Customizations = library },
+				workspace.ApplicationInstructionsPath);
+			string system = config.SystemMessage!.Content!;
+			Check.True(expected.Where(path => path != personal).All(path =>
+				system.Contains(Path.GetFileName(path), StringComparison.Ordinal)
+				|| system.Contains(File.ReadAllText(path).Trim(), StringComparison.Ordinal)),
+				"Send every enabled CLI and TurboPilot instruction to the session.");
+			Check.True(!system.Contains("PERSONAL_COPILOT_INSTRUCTION", StringComparison.Ordinal),
+				"Keep an explicitly disabled canonical instruction disabled.");
+			Check.Equal(additional,
+				CustomizationService.RootFolderFor(additionalModular),
+				"Recover the root of a nested modular instruction.");
+			Check.Equal(workspace.Workspace,
+				CustomizationService.RootFolderFor(claude),
+				"Recover the workspace root of .claude/CLAUDE.md.");
+
+			var saved = new CustomizationLibrary();
+			string savedOnly = workspace.Write(
+				"saved\\instructions\\saved.instructions.md", "SAVED_TURBOPILOT_INSTRUCTION");
+			saved.Instructions[savedOnly] = new()
+			{
+				FilePath = savedOnly,
+				Name = "saved",
+			};
+			saved.Instructions["removed-standard"] = new()
+			{
+				FilePath = "removed-standard",
+				Name = "removed-standard",
+				IsCliStandard = true,
+			};
+			string legacyStandard = Path.Combine(
+				workspace.Workspace, ".github", "instructions", "removed.instructions.md");
+			saved.Instructions[legacyStandard] = new()
+			{
+				FilePath = legacyStandard,
+				Name = "legacy-standard",
+			};
+			var refreshed = CustomizationService.RefreshStandardInstructions(
+				saved, library, currentDirectory);
+			Check.True(refreshed.Instructions.ContainsKey(savedOnly)
+				&& !refreshed.Instructions.ContainsKey("removed-standard")
+				&& !refreshed.Instructions.ContainsKey(legacyStandard)
+				&& standard.All(refreshed.Instructions.ContainsKey)
+				&& additionalOnly.All(path => !refreshed.Instructions.ContainsKey(path)),
+				"Refresh standard Copilot instructions without replacing a resumed session's TurboPilot additions.");
+		}
+		finally
+		{
+			Environment.SetEnvironmentVariable("COPILOT_HOME", originalHome);
+			Environment.SetEnvironmentVariable("COPILOT_CUSTOM_INSTRUCTIONS_DIRS", originalDirectories);
+		}
 	}
 
 	/// <summary>
