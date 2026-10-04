@@ -21,10 +21,10 @@ public partial class MainWindow : TurbolandWindow
 	private string? _outputHtmlUri;
 	private bool _webViewReady = false;
 
-	// The opening transcript is a document to read from the top, not a stream
-	// to follow. Only the first sync gets that treatment.
-	private bool _openedAtTop = false;
-	private bool _rawOpenedAtTop = false;
+	// A loaded transcript is a document to read from the top. Live output
+	// follows the bottom until another document is loaded.
+	private bool _renderedOpenAtTopPending = true;
+	private bool _rawOpenAtTopPending = true;
 
 	// Raw preserves streamed text; Rendered can replace completed messages
 	// with prepared formatting.
@@ -658,20 +658,46 @@ public partial class MainWindow : TurbolandWindow
 	{
 		if (!_webViewReady) return;
 		_ = webViewOutput.CoreWebView2.ExecuteScriptAsync($"setTranscript({JsString(_renderedText.ToString())})");
+		ScrollRenderedTranscriptToTop();
+	}
 
-		if (_openedAtTop) return;
-		_openedAtTop = true;
+	/// <summary>
+	/// Positions both transcript views at the first line after saved history
+	/// replaces the current document. Streaming appends continue following
+	/// the bottom once the reader scrolls there.
+	/// </summary>
+	private void OpenTranscriptAtTop()
+	{
+		_renderedOpenAtTopPending = true;
+		_rawOpenAtTopPending = true;
+		ScrollRenderedTranscriptToTop();
+		ScrollRawTranscriptToTop();
+	}
+
+	private void ScrollRenderedTranscriptToTop()
+	{
+		if (!_renderedOpenAtTopPending || !_webViewReady) return;
+		_renderedOpenAtTopPending = false;
 		_ = webViewOutput.CoreWebView2.ExecuteScriptAsync("scrollToTop()");
+	}
+
+	private void ScrollRawTranscriptToTop()
+	{
+		if (!_rawOpenAtTopPending || !richTextBoxOutput.IsLoaded) return;
+		_rawOpenAtTopPending = false;
+		richTextBoxOutput.Dispatcher.BeginInvoke(
+			System.Windows.Threading.DispatcherPriority.Loaded,
+			new Action(() =>
+			{
+				richTextBoxOutput.CaretPosition = _rawOutputRun.ContentStart;
+				richTextBoxOutput.ScrollToHome();
+			}));
 	}
 
 	/// <summary>
 	/// Returns a JS-safe string literal for ExecuteScriptAsync.
 	/// </summary>
-	private static string JsString(string s)
-	{
-		if (string.IsNullOrEmpty(s)) return "''";
-		return "'" + s.Replace("\\", "\\\\").Replace("'", "\\'").Replace("\r", "\\r").Replace("\n", "\\n").Replace("\t", "\\t") + "'";
-	}
+	private static string JsString(string text) => JsonSerializer.Serialize(text);
 
 	/// <summary>
 	/// Help menu: appends the help document to the output without clearing
@@ -704,16 +730,7 @@ public partial class MainWindow : TurbolandWindow
 	/// </summary>
 	private void RichTextBoxOutput_FirstRealized(object sender, RoutedEventArgs e)
 	{
-		if (_rawOpenedAtTop) return;
-		_rawOpenedAtTop = true;
-
-		// ScrollToHome moves the caret and the viewport together, which is how
-		// a text view is meant to be rewound. The call has to wait for layout,
-		// because the text view does not exist until the tab holding it is
-		// measured.
-		richTextBoxOutput.Dispatcher.BeginInvoke(
-			System.Windows.Threading.DispatcherPriority.Loaded,
-			new Action(richTextBoxOutput.ScrollToHome));
+		ScrollRawTranscriptToTop();
 	}
 
 	// ── Prompt history navigation ────────────────────────────────────────────
@@ -1045,7 +1062,10 @@ public partial class MainWindow : TurbolandWindow
 			if (resumeId is null)
 				await chat.StartAsync(options, cancellation.Token);
 			else
+			{
 				await chat.ResumeAsync(resumeId, options, cancellation.Token);
+				OpenTranscriptAtTop();
+			}
 			if (bootstrap is not null)
 			{
 				chat.SetBootstrap(bootstrap);
@@ -1144,6 +1164,7 @@ public partial class MainWindow : TurbolandWindow
 				ClearOutput();
 				AppendRawOutput(transcript);
 				AppendRenderedOutput(rendered);
+				OpenTranscriptAtTop();
 				return;
 			}
 

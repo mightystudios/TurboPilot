@@ -260,6 +260,11 @@ internal static class UiChecks
 			Check.Equal("Start or resume a session to begin.", Status(window), "Initial status");
 			window.Show();
 			await Check.UntilAsync(() => Field<bool>(window, "_webViewReady"), "The rendered output did not initialize.");
+			var outputTabs = Control<TabControl>(window, "outputTabs");
+			outputTabs.SelectedIndex = 1;
+			await window.Dispatcher.InvokeAsync(() => { }, DispatcherPriority.Loaded);
+			outputTabs.SelectedIndex = 0;
+			await window.Dispatcher.InvokeAsync(() => { }, DispatcherPriority.Loaded);
 			await CheckPromptLayoutAsync(window);
 			await CheckRenderedUserPromptStyleAsync(window, webView);
 
@@ -376,6 +381,12 @@ internal static class UiChecks
 			Check.Equal("+1", Control<Button>(window, "buttonAttachments").Content, "Retain unsent attachments");
 			attachments.Clear();
 			Invoke(window, "UpdateAttachmentButton");
+			chat.AddNotice("\r\n" + string.Join("\r\n",
+				Enumerable.Range(0, 200).Select(index => $"saved-history-line-{index:D3}")) + "\r\n");
+			await Check.UntilAsync(() => window.OutputText.Contains("saved-history-line-199"),
+				"The long saved transcript did not reach the window.");
+			const string renderedRestoreSentinel = "saved-rendered-after-control";
+			chat.AddNotice($"binary-prefix{(char)0}{(char)2}{(char)26}{renderedRestoreSentinel}\r\n");
 			var sessionId = chat.SessionId!;
 			await window.EndSessionAsync();
 			var displayedAtEnd = window.OutputText;
@@ -387,12 +398,14 @@ internal static class UiChecks
 			await ChoosePastSessionAsync(application, window, sessionId, "buttonView");
 			Check.Equal(workspace.Store.ReadTranscript(sessionId), window.OutputText, "View saved history without starting a runtime");
 			Check.True(!window.IsSessionActive, "Offline viewing must not create a live session.");
+			await CheckTranscriptOpenedAtTopAsync(window, webView, "Viewing saved history", renderedRestoreSentinel);
 			await ChoosePastSessionAsync(application, window, sessionId, "buttonResume");
 			await Check.UntilAsync(() => window.IsSessionActive && Status(window).StartsWith("Ready.."),
 				"The Past Sessions menu did not resume the selected session.", timeoutSeconds: 45);
 			Check.Equal(sessionId, Field<ChatService>(window, "_chat").SessionId, "Resume the selected ID in the main window");
 			Check.True(window.OutputText.Contains("UI streaming reply"), "Recall earlier output in both tabs.");
-			Console.WriteLine("PASS failed-send recovery, stale-event isolation, Past Sessions viewing, and UI resume");
+			await CheckTranscriptOpenedAtTopAsync(window, webView, "Resuming saved history", renderedRestoreSentinel);
+			Console.WriteLine("PASS failed-send recovery, stale-event isolation, Past Sessions viewing, and UI resume at the transcript start");
 
 			await window.EndSessionAsync();
 			var canceledStart = InvokeTask(window, "StartChatAsync", options, null);
@@ -1456,6 +1469,31 @@ internal static class UiChecks
 			await Check.UntilAsync(() => chosen, "The Past Sessions menu did not open its picker.");
 		}
 		finally { timer.Stop(); }
+	}
+
+	private static async Task CheckTranscriptOpenedAtTopAsync(MainWindow window, WebView2 webView, string operation,
+		string requiredRenderedText)
+	{
+		var tabs = Control<TabControl>(window, "outputTabs");
+		var raw = Control<RichTextBox>(window, "richTextBoxOutput");
+		tabs.SelectedIndex = 1;
+		await window.Dispatcher.InvokeAsync(() => { }, DispatcherPriority.ApplicationIdle);
+		Check.True(raw.VerticalOffset < 1, $"{operation} must open the Raw transcript at its first line.");
+
+		tabs.SelectedIndex = 0;
+		await window.Dispatcher.InvokeAsync(() => { }, DispatcherPriority.ApplicationIdle);
+		var renderedReady = false;
+		for (var attempt = 0; attempt < 100 && !renderedReady; attempt++)
+		{
+			using var result = JsonDocument.Parse(await webView.CoreWebView2.ExecuteScriptAsync(
+				$"({{offset: window.scrollY, hasText: document.getElementById('output').textContent.includes({JsonSerializer.Serialize(requiredRenderedText)})}})"));
+			renderedReady = result.RootElement.GetProperty("offset").GetDouble() < 1
+				&& result.RootElement.GetProperty("hasText").GetBoolean();
+			if (!renderedReady)
+				await Task.Delay(50);
+		}
+		Check.True(renderedReady,
+			$"{operation} must restore the Rendered transcript and open it at its first line.");
 	}
 
 	private static T Control<T>(FrameworkElement owner, string name) where T : class =>
