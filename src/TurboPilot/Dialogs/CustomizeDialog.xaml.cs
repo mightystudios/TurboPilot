@@ -22,6 +22,7 @@ namespace TurboPilot.Dialogs;
 public partial class CustomizeDialog : TurbolandFloatingDialog
 {
 	private readonly List<string> _folders;
+	private readonly string? _workspaceFolder;
 
 	// Deep copy of the collected library; the live lists stay untouched
 	// until Commit on OK. Replaced (not mutated) when a load rebuilds it
@@ -54,18 +55,25 @@ public partial class CustomizeDialog : TurbolandFloatingDialog
 	/// </summary>
 	public IReadOnlyList<string> PromptReferences => _promptReferences;
 
-	public CustomizeDialog()
+	public CustomizeDialog(string? workspaceFolder = null)
+		: this(workspaceFolder, Settings.Load().CustomizationFolders, CustomizationService.Current)
+	{
+	}
+
+	internal CustomizeDialog(string? workspaceFolder, IReadOnlyList<string> folders,
+		CustomizationLibrary previous)
 	{
 		InitializeComponent();
 
 		_baseTitle = Title;
+		_workspaceFolder = workspaceFolder;
 
-		_folders = Settings.Load().CustomizationFolders
+		_folders = folders
 			.Where(f => !string.IsNullOrWhiteSpace(f))
 			.Select(f => f.Trim())
 			.ToList();
 
-		_library = CustomizationService.Current.Clone();
+		_library = CustomizationService.Preview(workspaceFolder, _folders, previous);
 
 		ReloadList();
 		UpdateButtonStates();
@@ -411,7 +419,7 @@ public partial class CustomizeDialog : TurbolandFloatingDialog
 		// changed) roots; the rescan carries the committed flags across by
 		// key so nothing the user just chose is lost.
 		CustomizationService.Commit(_library);
-		CustomizationService.Rescan(settings.LastWorkspacePath);
+		CustomizationService.Rescan(_workspaceFolder);
 
 		// The rescan replaces the library the next session reads, but a
 		// session already running took its instructions, skills and agent

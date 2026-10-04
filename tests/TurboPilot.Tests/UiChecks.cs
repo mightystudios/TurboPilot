@@ -284,6 +284,7 @@ internal static class UiChecks
 			CheckReasoningEffortDefaults(workspace);
 			CheckPastSessionsLayout(window);
 			CheckPastSessionsDelete(application, window, workspace);
+			CheckCustomizationDiscoveryDialog(workspace);
 			CheckPromptReferences(window);
 			await CheckCommandsAsync(window, workspace);
 			CheckChangeActions(application, window);
@@ -1313,11 +1314,46 @@ internal static class UiChecks
 				Check.Equal("one\r\ntwo\r\nthree", Input(window).TrimEnd(),
 					"A repeated pick must not be added twice, and typed text is kept");
 			}
+
 			finally { SetInput(window, restore); }
 
 			Console.WriteLine("PASS customization add to prompt");
 		}
 		finally { dialog.Close(); }
+	}
+
+	private static void CheckCustomizationDiscoveryDialog(TestWorkspace workspace)
+	{
+		string home = Path.Combine(workspace.Root, "dialog-copilot-home");
+		string canonical = workspace.Write(
+			"dialog-copilot-home\\copilot-instructions.md", "DIALOG_CANONICAL_INSTRUCTION");
+		string? originalHome = Environment.GetEnvironmentVariable("COPILOT_HOME");
+		string? originalDirectories = Environment.GetEnvironmentVariable("COPILOT_CUSTOM_INSTRUCTIONS_DIRS");
+		try
+		{
+			Environment.SetEnvironmentVariable("COPILOT_HOME", home);
+			Environment.SetEnvironmentVariable("COPILOT_CUSTOM_INSTRUCTIONS_DIRS", null);
+			var dialog = new CustomizeDialog(
+				workspaceFolder: null, folders: [], previous: new CustomizationLibrary());
+			try
+			{
+				var library = Field<CustomizationLibrary>(dialog, "_library");
+				Check.True(library.Instructions.ContainsKey(canonical),
+					"The Customization dialog must scan the canonical instruction before a session starts.");
+				Check.Equal("Instructions (1)",
+					Control<TabItem>(dialog, "tabInstructions").Header,
+					"Show the scanned canonical instruction in the tab count");
+			}
+			finally
+			{
+				dialog.Close();
+			}
+		}
+		finally
+		{
+			Environment.SetEnvironmentVariable("COPILOT_HOME", originalHome);
+			Environment.SetEnvironmentVariable("COPILOT_CUSTOM_INSTRUCTIONS_DIRS", originalDirectories);
+		}
 	}
 
 	private static void CheckTools(Application application, MainWindow window, TestWorkspace workspace)

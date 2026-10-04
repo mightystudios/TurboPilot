@@ -451,7 +451,7 @@ public partial class SettingsDialog : TurbolandFloatingDialog
 		// once Begin Session has run, so using it here would reset the
 		// user's in-dialog choice back to Standard.
 		var current = comboMode.SelectedItem as string ?? "Standard";
-		var customize = new CustomizeDialog();
+		var customize = new CustomizeDialog(ValidatedWorkspacePath());
 		customize.ShowDialog(this);
 		// Items picked for the prompt travel out with this dialog, since
 		// the main window is what owns the prompt box.
