@@ -424,8 +424,8 @@ internal static class UiChecks
 			Check.True(resumedInstructions.ContainsKey(refreshedStandard)
 				&& !resumedInstructions.ContainsKey(newerTurboPilotInstruction),
 				"Refresh standard CLI instructions on resume without replacing saved TurboPilot additions.");
-			await CheckTranscriptOpenedAtTopAsync(window, webView, "Resuming saved history", renderedRestoreSentinel);
-			Console.WriteLine("PASS failed-send recovery, stale-event isolation, Past Sessions viewing, and UI resume at the transcript start");
+			await CheckTranscriptOpenedAtEndAsync(window, webView, "Resuming saved history", renderedRestoreSentinel);
+			Console.WriteLine("PASS failed-send recovery, stale-event isolation, Past Sessions viewing at the start, and UI resume at the end");
 
 			await window.EndSessionAsync();
 			var canceledStart = InvokeTask(window, "StartChatAsync", options, null);
@@ -1549,6 +1549,40 @@ internal static class UiChecks
 		}
 		Check.True(renderedReady,
 			$"{operation} must restore the Rendered transcript and open it at its first line.");
+	}
+
+	private static async Task CheckTranscriptOpenedAtEndAsync(MainWindow window, WebView2 webView, string operation,
+		string requiredRenderedText)
+	{
+		var tabs = Control<TabControl>(window, "outputTabs");
+		var raw = Control<RichTextBox>(window, "richTextBoxOutput");
+		tabs.SelectedIndex = 1;
+		var rawReady = false;
+		for (var attempt = 0; attempt < 100 && !rawReady; attempt++)
+		{
+			await window.Dispatcher.InvokeAsync(() => { }, DispatcherPriority.ApplicationIdle);
+			rawReady = raw.ExtentHeight > raw.ViewportHeight
+				&& raw.VerticalOffset + raw.ViewportHeight >= raw.ExtentHeight - 1;
+			if (!rawReady)
+				await Task.Delay(50);
+		}
+		Check.True(rawReady, $"{operation} must open the Raw transcript at its last line.");
+
+		tabs.SelectedIndex = 0;
+		await window.Dispatcher.InvokeAsync(() => { }, DispatcherPriority.ApplicationIdle);
+		var renderedReady = false;
+		for (var attempt = 0; attempt < 100 && !renderedReady; attempt++)
+		{
+			using var result = JsonDocument.Parse(await webView.CoreWebView2.ExecuteScriptAsync(
+				$"({{atEnd: window.scrollY + window.innerHeight >= document.documentElement.scrollHeight - 1, "
+				+ $"hasText: document.getElementById('output').textContent.includes({JsonSerializer.Serialize(requiredRenderedText)})}})"));
+			renderedReady = result.RootElement.GetProperty("atEnd").GetBoolean()
+				&& result.RootElement.GetProperty("hasText").GetBoolean();
+			if (!renderedReady)
+				await Task.Delay(50);
+		}
+		Check.True(renderedReady,
+			$"{operation} must restore the Rendered transcript and open it at its last line.");
 	}
 
 	private static T Control<T>(FrameworkElement owner, string name) where T : class =>

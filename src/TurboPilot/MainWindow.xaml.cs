@@ -21,10 +21,17 @@ public partial class MainWindow : TurbolandWindow
 	private string? _outputHtmlUri;
 	private bool _webViewReady = false;
 
-	// A loaded transcript is a document to read from the top. Live output
-	// follows the bottom until another document is loaded.
-	private bool _renderedOpenAtTopPending = true;
-	private bool _rawOpenAtTopPending = true;
+	// The startup help and offline history open at the top. A resumed live
+	// session opens at the end. Keep each request until its view is ready.
+	private TranscriptPosition _renderedTranscriptPosition = TranscriptPosition.Top;
+	private TranscriptPosition _rawTranscriptPosition = TranscriptPosition.Top;
+
+	private enum TranscriptPosition
+	{
+		None,
+		Top,
+		End,
+	}
 
 	// Raw preserves streamed text; Rendered can replace completed messages
 	// with prepared formatting.
@@ -658,39 +665,57 @@ public partial class MainWindow : TurbolandWindow
 	{
 		if (!_webViewReady) return;
 		_ = webViewOutput.CoreWebView2.ExecuteScriptAsync($"setTranscript({JsString(_renderedText.ToString())})");
-		ScrollRenderedTranscriptToTop();
+		ApplyRenderedTranscriptPosition();
 	}
 
 	/// <summary>
-	/// Positions both transcript views at the first line after saved history
-	/// replaces the current document. Streaming appends continue following
-	/// the bottom once the reader scrolls there.
+	/// Positions both transcript views after saved history replaces the
+	/// current document. Offline history opens at the top; a resumed live
+	/// session opens at the end and follows new output.
 	/// </summary>
-	private void OpenTranscriptAtTop()
+	private void OpenTranscriptAt(TranscriptPosition position)
 	{
-		_renderedOpenAtTopPending = true;
-		_rawOpenAtTopPending = true;
-		ScrollRenderedTranscriptToTop();
-		ScrollRawTranscriptToTop();
+		_renderedTranscriptPosition = position;
+		_rawTranscriptPosition = position;
+		ApplyRenderedTranscriptPosition();
+		ApplyRawTranscriptPosition();
 	}
 
-	private void ScrollRenderedTranscriptToTop()
+	private void OpenTranscriptAtTop() => OpenTranscriptAt(TranscriptPosition.Top);
+
+	private void OpenTranscriptAtEnd() => OpenTranscriptAt(TranscriptPosition.End);
+
+	private void ApplyRenderedTranscriptPosition()
 	{
-		if (!_renderedOpenAtTopPending || !_webViewReady) return;
-		_renderedOpenAtTopPending = false;
-		_ = webViewOutput.CoreWebView2.ExecuteScriptAsync("scrollToTop()");
+		if (_renderedTranscriptPosition == TranscriptPosition.None || !_webViewReady) return;
+
+		string function = _renderedTranscriptPosition == TranscriptPosition.Top
+			? "scrollToTop"
+			: "scrollToEnd";
+		_renderedTranscriptPosition = TranscriptPosition.None;
+		_ = webViewOutput.CoreWebView2.ExecuteScriptAsync($"{function}()");
 	}
 
-	private void ScrollRawTranscriptToTop()
+	private void ApplyRawTranscriptPosition()
 	{
-		if (!_rawOpenAtTopPending || !richTextBoxOutput.IsLoaded) return;
-		_rawOpenAtTopPending = false;
+		if (_rawTranscriptPosition == TranscriptPosition.None || !richTextBoxOutput.IsLoaded) return;
+
+		TranscriptPosition position = _rawTranscriptPosition;
+		_rawTranscriptPosition = TranscriptPosition.None;
 		richTextBoxOutput.Dispatcher.BeginInvoke(
 			System.Windows.Threading.DispatcherPriority.Loaded,
 			new Action(() =>
 			{
-				richTextBoxOutput.CaretPosition = _rawOutputRun.ContentStart;
-				richTextBoxOutput.ScrollToHome();
+				if (position == TranscriptPosition.Top)
+				{
+					richTextBoxOutput.CaretPosition = _rawOutputRun.ContentStart;
+					richTextBoxOutput.ScrollToHome();
+				}
+				else
+				{
+					richTextBoxOutput.CaretPosition = _rawOutputRun.ContentEnd;
+					richTextBoxOutput.ScrollToEnd();
+				}
 			}));
 	}
 
@@ -730,7 +755,7 @@ public partial class MainWindow : TurbolandWindow
 	/// </summary>
 	private void RichTextBoxOutput_FirstRealized(object sender, RoutedEventArgs e)
 	{
-		ScrollRawTranscriptToTop();
+		ApplyRawTranscriptPosition();
 	}
 
 	// ── Prompt history navigation ────────────────────────────────────────────
@@ -1066,7 +1091,7 @@ public partial class MainWindow : TurbolandWindow
 			else
 			{
 				await chat.ResumeAsync(resumeId, options, cancellation.Token);
-				OpenTranscriptAtTop();
+				OpenTranscriptAtEnd();
 			}
 			if (bootstrap is not null)
 			{

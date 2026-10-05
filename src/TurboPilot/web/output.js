@@ -18,6 +18,8 @@
  *   clearAll()                             - clear all output
  *   scrollToTop()                          - show the first line and stop
  *                                            following the bottom
+ *   scrollToEnd()                          - show the last line and follow
+ *                                            new output
  *
  * Application notices (questions, permission requests, tool calls,
  * errors and session banners) arrive in that same stream as small
@@ -747,6 +749,15 @@
 	window.scrollToTop = function () {
 		stickToBottom = false;
 		window.scrollTo(0, 0);
+	};
+
+	/**
+	 * Jump to the end of the transcript and pin later output there. Used
+	 * when a saved session resumes as a live conversation.
+	 */
+	window.scrollToEnd = function () {
+		stickToBottom = true;
+		scrollToBottom();
 	};
 
 	/**
