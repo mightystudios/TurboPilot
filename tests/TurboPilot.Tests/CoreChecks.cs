@@ -1,5 +1,6 @@
 using System.IO;
 using System.Text;
+using System.Windows;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
 using GitHub.Copilot;
@@ -25,6 +26,7 @@ internal static class CoreChecks
 		CheckExternalTools();
 		CheckExternalLinks();
 		CheckClipboardImageAttachment();
+		CheckDroppedFileAttachments();
 		CheckWorkspaceReadme();
 		CheckShortText();
 		CheckArchiveLine();
@@ -83,6 +85,42 @@ internal static class CoreChecks
 		{
 			ClipboardImageAttachment.TryDelete(path);
 		}
+	}
+
+	private static void CheckDroppedFileAttachments()
+	{
+		using var workspace = new TestWorkspace();
+		var first = workspace.Write("workspace\\first.txt", "first");
+		var second = workspace.Write("workspace\\src\\second.txt", "second");
+		var folder = Path.Combine(workspace.Workspace, "folder");
+		Directory.CreateDirectory(folder);
+
+		var shellDrop = new DataObject();
+		shellDrop.SetData(DataFormats.FileDrop, new[] { first, folder, first });
+		Check.True(DroppedFileAttachments.ContainsSupportedFormat(shellDrop),
+			"Accept the standard shell file-drop format.");
+		Check.True(DroppedFileAttachments.ExtractFiles(shellDrop).SequenceEqual([first]),
+			"Keep existing files, remove duplicate paths, and reject folders.");
+
+		var fileNameDrop = new DataObject();
+		fileNameDrop.SetData("FileNameW", new MemoryStream(Encoding.Unicode.GetBytes(second + "\0")));
+		Check.True(DroppedFileAttachments.ExtractFiles(fileNameDrop).SequenceEqual([second]),
+			"Read the single-file shell drag format.");
+
+		var project = Path.Combine(workspace.Workspace, "fixture.csproj");
+		File.WriteAllText(project, "<Project />");
+		var visualStudioDrop = new DataObject();
+		var payload = $"{{00000000-0000-0000-0000-000000000000}}|{project}|src\\second.txt\0";
+		visualStudioDrop.SetData(
+			"CF_VSREFPROJECTITEMS",
+			new MemoryStream(Encoding.Unicode.GetBytes(payload)));
+		Check.True(DroppedFileAttachments.ExtractFiles(visualStudioDrop).SequenceEqual([second]),
+			"Resolve Visual Studio project items against their project file.");
+
+		var text = new DataObject(DataFormats.UnicodeText, first);
+		Check.True(!DroppedFileAttachments.ContainsSupportedFormat(text)
+			&& DroppedFileAttachments.ExtractFiles(text).Count == 0,
+			"Do not turn dragged text into an attachment.");
 	}
 
 	private static void CheckCustomizationDiscovery()

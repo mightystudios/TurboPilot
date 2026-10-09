@@ -267,6 +267,47 @@ public partial class MainWindow : TurbolandWindow
 		UpdateAttachmentButton();
 	}
 
+	private void Input_PreviewDragOver(object sender, DragEventArgs e)
+	{
+		e.Effects = buttonAttachments.IsEnabled
+			&& DroppedFileAttachments.ContainsSupportedFormat(e.Data)
+				? DragDropEffects.Copy
+				: DragDropEffects.None;
+		e.Handled = true;
+	}
+
+	private void Input_PreviewDrop(object sender, DragEventArgs e)
+	{
+		e.Handled = true;
+		if (!buttonAttachments.IsEnabled)
+			return;
+		AddDroppedFiles(e.Data);
+	}
+
+	private bool AddDroppedFiles(IDataObject data)
+	{
+		var files = DroppedFileAttachments.ExtractFiles(data);
+		if (files.Count == 0)
+		{
+			var formats = DroppedFileAttachments.Formats(data);
+			ShowNotice("Cannot add files from this drop. Formats: "
+				+ (formats.Count == 0 ? "(none)" : string.Join(", ", formats)));
+			return false;
+		}
+
+		var added = 0;
+		foreach (var file in files)
+		{
+			if (_attachments.Contains(file, StringComparer.OrdinalIgnoreCase))
+				continue;
+			_attachments.Add(file);
+			added++;
+		}
+		if (added > 0)
+			UpdateAttachmentButton();
+		return added > 0;
+	}
+
 	/// <summary>
 	/// Updates the attachments button text to show the current count.
 	/// Format: "+N" where N is the number of attachments.

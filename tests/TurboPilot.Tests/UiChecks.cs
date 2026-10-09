@@ -290,6 +290,7 @@ internal static class UiChecks
 			CheckCustomizationDiscoveryDialog(workspace);
 			CheckPromptReferences(window);
 			await CheckCommandsAsync(window, workspace);
+			CheckFileDrop(window, workspace);
 			CheckChangeActions(application, window);
 
 			var reply = new LocalProvider.Reply("**UI streaming reply**\n\n```mermaid\ngraph TD\nA[Input] --> B[Output]\n```");
@@ -835,6 +836,39 @@ internal static class UiChecks
 
 		Check.True(pastedPath is not null && !File.Exists(pastedPath),
 			"Delete a temporary image when it leaves pending attachments.");
+	}
+
+	private static void CheckFileDrop(MainWindow window, TestWorkspace workspace)
+	{
+		var input = Control<RichTextBox>(window, "richTextBoxInput");
+		var attachments = Field<List<string>>(window, "_attachments");
+		var previousAttachments = attachments.ToArray();
+		var file = workspace.Write("workspace\\dropped-file.txt", "dropped");
+		var data = new DataObject();
+		data.SetData(DataFormats.FileDrop, new[] { file });
+
+		try
+		{
+			Check.True(input.AllowDrop, "Accept file drops on the prompt editor.");
+			Check.True((bool)Invoke(window, "AddDroppedFiles", data)!,
+				"Add a dropped file to pending attachments.");
+			Check.True(attachments.Contains(file, StringComparer.OrdinalIgnoreCase),
+				"Keep the dropped file in the pending attachment list.");
+			Check.Equal($"+{previousAttachments.Length + 1}",
+				Control<Button>(window, "buttonAttachments").Content,
+				"Update the pending attachment count after a file drop.");
+			Check.True(!(bool)Invoke(window, "AddDroppedFiles", data)!,
+				"Do not add the same dropped file twice.");
+			Check.Equal(previousAttachments.Length + 1, attachments.Count,
+				"Keep one pending entry for a duplicate drop.");
+		}
+		finally
+		{
+			attachments.Clear();
+			attachments.AddRange(previousAttachments);
+			Invoke(window, "UpdateAttachmentButton");
+		}
+		Console.WriteLine("PASS prompt file drop attachment");
 	}
 
 	/// <summary>
