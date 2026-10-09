@@ -20,6 +20,7 @@ internal static class CoreChecks
 		CheckCustomizationDiscovery();
 		CheckApplicationInstructions();
 		CheckExternalTools();
+		CheckExternalLinks();
 		CheckWorkspaceReadme();
 		CheckShortText();
 		CheckArchiveLine();
@@ -34,6 +35,21 @@ internal static class CoreChecks
 		await CheckToolRowsAsync();
 		CheckHistoryAndStatus();
 		Console.WriteLine("PASS configuration, history storage, questions, streaming events, tool rows, usage, prompt navigation, and external tools");
+	}
+
+	private static void CheckExternalLinks()
+	{
+		var web = MainWindow.ExternalLinkCommand("https://example.com/docs?q=one");
+		Check.True(web is { UseShellExecute: true }, "Open web links through the system shell.");
+		Check.Equal("https://example.com/docs?q=one", web!.FileName, "Keep the external web address.");
+
+		var mail = MainWindow.ExternalLinkCommand("mailto:test@example.com");
+		Check.True(mail is { UseShellExecute: true }, "Open mail links through their registered application.");
+		Check.True(MainWindow.ExternalLinkCommand("file:///C:/Windows/win.ini") is null
+			&& MainWindow.ExternalLinkCommand("javascript:alert(1)") is null
+			&& MainWindow.ExternalLinkCommand("kp-path:C%3A%5Cfile.txt") is null
+			&& MainWindow.ExternalLinkCommand("relative.md") is null,
+			"Reject local, internal, script, and relative links from the external launcher.");
 	}
 
 	private static void CheckCustomizationDiscovery()

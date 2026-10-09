@@ -235,9 +235,10 @@ internal static class UiChecks
 		using var workspace = new TestWorkspace();
 		await using var provider = new LocalProvider();
 		var library = workspace.CreateLibrary();
+		var externalStarts = new List<System.Diagnostics.ProcessStartInfo>();
 		TurbolandTheme.Wpf.TurbolandTheme.Apply(application, TurbolandTheme.Core.ThemeMode.Authentic);
 		var window = new MainWindow(workspace.Store, workspace.CreateChat, _ => library, Path.Combine(workspace.Root, "browser"),
-			workspace.ScriptsPath);
+			workspace.ScriptsPath, externalStarts.Add);
 		TurbolandTheme.Wpf.TurbolandTheme.ApplyTo(window);
 		var options = new ChatSessionOptions
 		{
@@ -267,6 +268,7 @@ internal static class UiChecks
 			await window.Dispatcher.InvokeAsync(() => { }, DispatcherPriority.Loaded);
 			await CheckPromptLayoutAsync(window);
 			await CheckRenderedUserPromptStyleAsync(window, webView);
+			await CheckExternalLinkAsync(window, webView, externalStarts);
 
 			var starting = InvokeTask(window, "StartChatAsync", options, null);
 			Check.True(Status(window).StartsWith("Starting.."), "Show Starting while connecting.");
@@ -452,6 +454,38 @@ internal static class UiChecks
 			if (hasBrowser)
 				await exited.Task.WaitAsync(TimeSpan.FromSeconds(15));
 		}
+	}
+
+	private static async Task CheckExternalLinkAsync(
+		MainWindow window,
+		WebView2 webView,
+		List<System.Diagnostics.ProcessStartInfo> externalStarts)
+	{
+		const string address = "https://example.com/turbopilot-link-check";
+		window.ClearOutput();
+		window.AppendOutput($"[Open documentation]({address})\r\n");
+
+		var found = false;
+		for (var attempt = 0; attempt < 100 && !found; attempt++)
+		{
+			using var result = JsonDocument.Parse(await webView.CoreWebView2.ExecuteScriptAsync(
+				"!!document.querySelector('#output a[href=\"" + address + "\"]')"));
+			found = result.RootElement.GetBoolean();
+			if (!found)
+				await Task.Delay(100);
+		}
+		Check.True(found, "The Rendered Markdown link did not appear.");
+
+		var before = webView.Source;
+		await webView.CoreWebView2.ExecuteScriptAsync(
+			"document.querySelector('#output a[href=\"" + address + "\"]').click()");
+		await Check.UntilAsync(() => externalStarts.Count == 1, "The Markdown link was not handed to the system viewer.");
+
+		Check.Equal(address, externalStarts[0].FileName, "Open the clicked Markdown address.");
+		Check.True(externalStarts[0].UseShellExecute, "Use the registered default application for Markdown links.");
+		Check.Equal(before, webView.Source, "Keep the Rendered transcript loaded after a web link click.");
+		window.ClearOutput();
+		Console.WriteLine("PASS Rendered Markdown links open outside WebView2");
 	}
 
 	/// <summary>

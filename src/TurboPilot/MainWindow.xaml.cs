@@ -54,6 +54,7 @@ public partial class MainWindow : TurbolandWindow
 	private readonly Func<ChatService> _createChat;
 	private readonly Func<string?, CustomizationLibrary> _collectCustomizations;
 	private readonly string _webViewDataFolder;
+	private readonly Action<ProcessStartInfo> _launchExternal;
 
 	// The helper functions dotted into a Tools shell. Null uses the
 	// per-user file; tests point it somewhere disposable.
@@ -88,12 +89,13 @@ public partial class MainWindow : TurbolandWindow
 
 	internal MainWindow(SessionStore sessionStore, Func<ChatService>? createChat = null,
 		Func<string?, CustomizationLibrary>? collectCustomizations = null, string? webViewDataFolder = null,
-		string? scriptsPath = null)
+		string? scriptsPath = null, Action<ProcessStartInfo>? launchExternal = null)
 	{
 		_sessionStore = sessionStore;
 		_createChat = createChat ?? (() => new ChatService(_sessionStore));
 		_collectCustomizations = collectCustomizations ?? CustomizationService.Rescan;
 		_scriptsPath = scriptsPath;
+		_launchExternal = launchExternal ?? (startInfo => Process.Start(startInfo)?.Dispose());
 		_webViewDataFolder = webViewDataFolder ?? System.IO.Path.Combine(
 			Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "TurboPilot", "webview2-default");
 		InitializeComponent();
@@ -411,6 +413,10 @@ public partial class MainWindow : TurbolandWindow
 				}
 				break;
 
+			case "openUri":
+				LaunchInDefaultBrowser(path);
+				break;
+
 			case "action":
 				HandleChangeAction(path);
 				break;
@@ -533,29 +539,39 @@ public partial class MainWindow : TurbolandWindow
 	/// restricted to a small allowlist of safe schemes (http, https,
 	/// mailto). Any other scheme is silently ignored.
 	/// </summary>
-	private static void LaunchInDefaultBrowser(string? url)
+	private void LaunchInDefaultBrowser(string? url)
 	{
-		if (string.IsNullOrWhiteSpace(url)) return;
-
-		if (!url.StartsWith("http:", StringComparison.OrdinalIgnoreCase)
-		 && !url.StartsWith("https:", StringComparison.OrdinalIgnoreCase)
-		 && !url.StartsWith("mailto:", StringComparison.OrdinalIgnoreCase))
-		{
-			return;
-		}
+		var startInfo = ExternalLinkCommand(url);
+		if (startInfo is null) return;
 
 		try
 		{
-			Process.Start(new ProcessStartInfo
-			{
-				FileName = url,
-				UseShellExecute = true,
-			});
+			_launchExternal(startInfo);
 		}
 		catch
 		{
 			// Best-effort — browser may not be available
 		}
+	}
+
+	/// <summary>
+	/// Builds the shell command used for an external Markdown link.
+	/// Only schemes intended for a browser or mail client are accepted;
+	/// local file links use the separate path bridge.
+	/// </summary>
+	internal static ProcessStartInfo? ExternalLinkCommand(string? url)
+	{
+		if (!Uri.TryCreate(url, UriKind.Absolute, out var uri)
+			|| uri.Scheme is not ("http" or "https" or "mailto"))
+		{
+			return null;
+		}
+
+		return new ProcessStartInfo
+		{
+			FileName = uri.AbsoluteUri,
+			UseShellExecute = true,
+		};
 	}
 
 	// ── Output API ───────────────────────────────────────────────────────────
