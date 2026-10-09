@@ -217,6 +217,7 @@
                     <Grid.RowDefinitions>
                         <RowDefinition Height="*"/>
                         <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="Auto"/>
                     </Grid.RowDefinitions>
 
                     <RichTextBox x:Name="richTextBoxInput" 
@@ -228,14 +229,20 @@
 								HorizontalScrollBarVisibility="Auto" 
 								IsReadOnly="True"
 								AcceptsTab="True" 
-								AcceptsReturn="True" Grid.RowSpan="2">
+								AcceptsReturn="True">
                         <RichTextBox.Resources>
                             <Style TargetType="{x:Type Paragraph}">
                                 <Setter Property="Margin" Value="0"/>
                             </Style>
                         </RichTextBox.Resources>
                     </RichTextBox>
-                    <TextBlock x:Name="noticeTextBlock" Grid.Row="1" Margin="4,4,4,0"
+					<ScrollViewer x:Name="imagePreviewScroll" Grid.Row="1"
+							Visibility="Collapsed" MaxHeight="92"
+							HorizontalScrollBarVisibility="Auto"
+							VerticalScrollBarVisibility="Disabled">
+						<StackPanel x:Name="imagePreviewPanel" Orientation="Horizontal"/>
+					</ScrollViewer>
+                    <TextBlock x:Name="noticeTextBlock" Grid.Row="2" Margin="4,4,4,0"
 							TextWrapping="Wrap" MaxHeight="68" Visibility="Collapsed"
 							Foreground="{DynamicResource Turboland.Brush.WindowForeground}"/>
                     <!-- Prompt completion. The prompt box is at the bottom of

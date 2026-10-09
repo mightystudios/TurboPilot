@@ -5,6 +5,7 @@ using System.Windows;
 using System.Windows.Media;
 using Microsoft.Web.WebView2.Wpf;
 using TurbolandTheme.Wpf.Controls;
+using TurboPilot.Attachments;
 using TurboPilot.Ai;
 using TurboPilot.Commands;
 using TurboPilot.Customizations;
@@ -41,6 +42,9 @@ public partial class MainWindow : TurbolandWindow
 
 	// Attachments tracking
 	private readonly List<string> _attachments = new();
+	private readonly HashSet<string> _temporaryAttachments = new(StringComparer.OrdinalIgnoreCase);
+	private readonly Dictionary<string, FrameworkElement> _pastedImagePreviews =
+		new(StringComparer.OrdinalIgnoreCase);
 	private PromptReferenceCompletion? _referenceCompletion;
 
 	// Prompts sent this run, cycled through by the arrows beside the input
@@ -269,8 +273,60 @@ public partial class MainWindow : TurbolandWindow
 	/// </summary>
 	private void UpdateAttachmentButton()
 	{
+		PruneClipboardImageAttachments();
 		buttonAttachments.Content = $"+{_attachments.Count}";
 		RefreshPromptCompletion();
+	}
+
+	private void AddClipboardImageAttachment(System.Windows.Media.Imaging.BitmapSource image)
+	{
+		var path = ClipboardImageAttachment.SavePng(image);
+		try
+		{
+			var preview = new System.Windows.Controls.Image
+			{
+				Source = image,
+				MaxWidth = 120,
+				MaxHeight = 80,
+				Stretch = System.Windows.Media.Stretch.Uniform,
+				Margin = new Thickness(4, 4, 4, 2),
+				ToolTip = path,
+				SnapsToDevicePixels = true,
+			};
+
+			_attachments.Add(path);
+			_temporaryAttachments.Add(path);
+			_pastedImagePreviews.Add(path, preview);
+			imagePreviewPanel.Children.Add(preview);
+			imagePreviewScroll.Visibility = Visibility.Visible;
+			UpdateAttachmentButton();
+		}
+		catch
+		{
+			_attachments.RemoveAll(item => string.Equals(item, path, StringComparison.OrdinalIgnoreCase));
+			_temporaryAttachments.Remove(path);
+			if (_pastedImagePreviews.Remove(path, out var preview))
+				imagePreviewPanel.Children.Remove(preview);
+			ClipboardImageAttachment.TryDelete(path);
+			throw;
+		}
+	}
+
+	private void PruneClipboardImageAttachments()
+	{
+		foreach (var path in _temporaryAttachments
+			.Where(path => !_attachments.Contains(path, StringComparer.OrdinalIgnoreCase))
+			.ToArray())
+		{
+			if (_pastedImagePreviews.Remove(path, out var preview))
+				imagePreviewPanel.Children.Remove(preview);
+			_temporaryAttachments.Remove(path);
+			ClipboardImageAttachment.TryDelete(path);
+		}
+
+		imagePreviewScroll.Visibility = imagePreviewPanel.Children.Count == 0
+			? Visibility.Collapsed
+			: Visibility.Visible;
 	}
 
 	// ── WebView2 initialization ──────────────────────────────────────────────
@@ -1444,8 +1500,24 @@ public partial class MainWindow : TurbolandWindow
 			_ = SendCurrentInputAsync();
 	}
 
-	private static void Input_Pasting(object sender, DataObjectPastingEventArgs e)
+	private void Input_Pasting(object sender, DataObjectPastingEventArgs e)
 	{
+		try
+		{
+			if (ClipboardImageAttachment.Contains(e.DataObject))
+			{
+				e.CancelCommand();
+				AddClipboardImageAttachment(ClipboardImageAttachment.Read(e.DataObject));
+				return;
+			}
+		}
+		catch (Exception ex)
+		{
+			e.CancelCommand();
+			ShowNotice("Cannot attach the pasted image: " + ex.Message);
+			return;
+		}
+
 		var format = e.DataObject.GetDataPresent(DataFormats.UnicodeText)
 			? DataFormats.UnicodeText
 			: e.DataObject.GetDataPresent(DataFormats.Text)
@@ -2027,6 +2099,8 @@ public partial class MainWindow : TurbolandWindow
 
 	protected override void OnClosed(EventArgs e)
 	{
+		_attachments.Clear();
+		PruneClipboardImageAttachments();
 		webViewOutput.Dispose();
 		base.OnClosed(e);
 	}

@@ -1,6 +1,9 @@
 using System.IO;
 using System.Text;
+using System.Windows.Media;
+using System.Windows.Media.Imaging;
 using GitHub.Copilot;
+using TurboPilot.Attachments;
 using TurboPilot.Ai;
 using TurboPilot.Commands;
 using TurboPilot.Customizations;
@@ -21,6 +24,7 @@ internal static class CoreChecks
 		CheckApplicationInstructions();
 		CheckExternalTools();
 		CheckExternalLinks();
+		CheckClipboardImageAttachment();
 		CheckWorkspaceReadme();
 		CheckShortText();
 		CheckArchiveLine();
@@ -50,6 +54,35 @@ internal static class CoreChecks
 			&& MainWindow.ExternalLinkCommand("kp-path:C%3A%5Cfile.txt") is null
 			&& MainWindow.ExternalLinkCommand("relative.md") is null,
 			"Reject local, internal, script, and relative links from the external launcher.");
+	}
+
+	private static void CheckClipboardImageAttachment()
+	{
+		using var workspace = new TestWorkspace();
+		var image = BitmapSource.Create(
+			2,
+			1,
+			96,
+			96,
+			PixelFormats.Bgra32,
+			null,
+			new byte[] { 0, 0, 255, 255, 0, 255, 0, 255 },
+			8);
+		var path = ClipboardImageAttachment.SavePng(image, workspace.Root);
+		try
+		{
+			var bytes = File.ReadAllBytes(path);
+			Check.True(Path.GetFileName(path).StartsWith("clip-image-", StringComparison.Ordinal)
+				&& Path.GetExtension(path).Equals(".png", StringComparison.OrdinalIgnoreCase),
+				"Save pasted images as uniquely named PNG attachments.");
+			Check.True(bytes.Length > 8
+				&& bytes.AsSpan(0, 8).SequenceEqual(new byte[] { 137, 80, 78, 71, 13, 10, 26, 10 }),
+				"Write a valid PNG attachment.");
+		}
+		finally
+		{
+			ClipboardImageAttachment.TryDelete(path);
+		}
 	}
 
 	private static void CheckCustomizationDiscovery()

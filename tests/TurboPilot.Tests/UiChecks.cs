@@ -6,6 +6,8 @@ using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
 using System.Windows.Documents;
 using System.Windows.Input;
+using System.Windows.Media;
+using System.Windows.Media.Imaging;
 using System.Windows.Threading;
 using Microsoft.Web.WebView2.Wpf;
 using TurboPilot.Ai;
@@ -268,7 +270,6 @@ internal static class UiChecks
 			await window.Dispatcher.InvokeAsync(() => { }, DispatcherPriority.Loaded);
 			await CheckPromptLayoutAsync(window);
 			await CheckRenderedUserPromptStyleAsync(window, webView);
-			await CheckExternalLinkAsync(window, webView, externalStarts);
 
 			var starting = InvokeTask(window, "StartChatAsync", options, null);
 			Check.True(Status(window).StartsWith("Starting.."), "Show Starting while connecting.");
@@ -438,6 +439,7 @@ internal static class UiChecks
 			Console.WriteLine("PASS ending during startup without a ghost session");
 			await CheckReadmeOfferAsync(application, window, workspace, provider, options);
 			await CheckSessionWindowAsync(application, window, workspace, provider, options);
+			await CheckExternalLinkAsync(window, webView, externalStarts);
 			Check.Equal(0, provider.Errors.Count, "The UI provider must not hide request failures: "
 				+ string.Join(" | ", provider.Errors.Distinct()));
 		}
@@ -626,7 +628,7 @@ internal static class UiChecks
 		var input = Control<RichTextBox>(window, "richTextBoxInput");
 		var width = window.ActualWidth;
 
-		CheckPlainTextPaste(window);
+		CheckPromptPaste(window);
 
 		Check.True(!popup.IsOpen, "The command list stays shut until a command is typed.");
 		SetInput(window, "just a message");
@@ -715,6 +717,13 @@ internal static class UiChecks
 	/// <summary>CLIPBRD_E_CANT_OPEN: some other program has the clipboard open.</summary>
 	private const int ClipboardHeldElsewhere = unchecked((int)0x800401D0);
 
+	private static void CheckPromptPaste(MainWindow window)
+	{
+		CheckPlainTextPaste(window);
+		CheckImagePaste(window);
+		Console.WriteLine("PASS plain-text paste and clipboard image attachment preview");
+	}
+
 	private static void CheckPlainTextPaste(MainWindow window)
 	{
 		var input = Control<RichTextBox>(window, "richTextBoxInput");
@@ -738,7 +747,7 @@ internal static class UiChecks
 			clipboardData.SetData(DataFormats.UnicodeText, plainText);
 			clipboardData.SetData(DataFormats.Rtf,
 				@"{\rtf1\ansi{\fonttbl{\f0 Courier New;}}{\colortbl;\red255\green0\blue255;}\f0\fs40\cf1 rich clipboard representation}");
-			Clipboard.SetDataObject(clipboardData, true);
+			Clipboard.SetDataObject(clipboardData, false);
 
 			SetInput(window, string.Empty);
 			ApplicationCommands.Paste.Execute(null, input);
@@ -756,14 +765,76 @@ internal static class UiChecks
 				Check.Equal(input.FontSize, run.FontSize, "Paste must not import the clipboard font size.");
 			}
 		}
+		catch (System.Runtime.InteropServices.COMException error) when (error.HResult == ClipboardHeldElsewhere)
+		{
+			Console.WriteLine("SKIP plain-text paste: another program is holding the clipboard open");
+		}
 		finally
 		{
 			if (previousClipboard is null)
-				Clipboard.Clear();
+			{
+				try { Clipboard.Clear(); }
+				catch (System.Runtime.InteropServices.COMException error) when (error.HResult == ClipboardHeldElsewhere) { }
+			}
 			else
-				Clipboard.SetDataObject(previousClipboard, true);
+			{
+				try { Clipboard.SetDataObject(previousClipboard, false); }
+				catch (System.Runtime.InteropServices.COMException error) when (error.HResult == ClipboardHeldElsewhere) { }
+			}
 			SetInput(window, previousInput);
 		}
+	}
+
+	private static void CheckImagePaste(MainWindow window)
+	{
+		var input = Control<RichTextBox>(window, "richTextBoxInput");
+		var previousInput = Input(window);
+		var attachments = Field<List<string>>(window, "_attachments");
+		var previousAttachments = attachments.ToArray();
+		string? pastedPath = null;
+
+		try
+		{
+			var image = BitmapSource.Create(
+				2,
+				1,
+				96,
+				96,
+				PixelFormats.Bgra32,
+				null,
+				new byte[] { 0, 0, 255, 255, 0, 255, 0, 255 },
+				8);
+			var imageData = new DataObject();
+			imageData.SetData(DataFormats.Bitmap, image);
+			var paste = new DataObjectPastingEventArgs(imageData, false, DataFormats.Bitmap);
+
+			SetInput(window, string.Empty);
+			Invoke(window, "Input_Pasting", input, paste);
+
+			pastedPath = attachments.Except(previousAttachments, StringComparer.OrdinalIgnoreCase).Single();
+			var previews = Control<StackPanel>(window, "imagePreviewPanel");
+			var previewScroll = Control<ScrollViewer>(window, "imagePreviewScroll");
+			Check.True(File.Exists(pastedPath)
+				&& Path.GetExtension(pastedPath).Equals(".png", StringComparison.OrdinalIgnoreCase),
+				"Persist a clipboard image as a temporary PNG attachment.");
+			Check.Equal($"+{previousAttachments.Length + 1}",
+				Control<Button>(window, "buttonAttachments").Content,
+				"Count a pasted image as a pending attachment.");
+			Check.True(previewScroll.Visibility == Visibility.Visible
+				&& previews.Children.OfType<Image>().Single().Source is not null,
+				"Show a thumbnail for the pasted image in the prompt pane.");
+			Check.Equal(string.Empty, Input(window), "Do not insert binary clipboard content as prompt text.");
+		}
+		finally
+		{
+			attachments.Clear();
+			attachments.AddRange(previousAttachments);
+			Invoke(window, "UpdateAttachmentButton");
+			SetInput(window, previousInput);
+		}
+
+		Check.True(pastedPath is not null && !File.Exists(pastedPath),
+			"Delete a temporary image when it leaves pending attachments.");
 	}
 
 	/// <summary>
