@@ -110,16 +110,19 @@
             <StatusBarItem x:Name="statusBarItem" MinWidth="0" HorizontalContentAlignment="Stretch">
                 <Grid x:Name="statusTextViewport" ClipToBounds="True"
                       SizeChanged="StatusText_SizeChanged">
-                    <TextBlock x:Name="statusTextBlock"
-                               Text="Start or resume a session to begin."
-                               TextWrapping="NoWrap"
-                               HorizontalAlignment="Left"
-                               VerticalAlignment="Center"
-                               SizeChanged="StatusText_SizeChanged">
-                        <TextBlock.RenderTransform>
-                            <TranslateTransform x:Name="statusTextTransform"/>
-                        </TextBlock.RenderTransform>
-                    </TextBlock>
+                    <!-- Canvas measures the line at its complete natural width.
+                         The viewport, rather than the TextBlock's layout slot,
+                         is then the only clip applied during the marquee. -->
+                    <Canvas Height="{DynamicResource Turboland.Metric.StatusBarHeight}">
+                        <TextBlock x:Name="statusTextBlock"
+                                   Text="Start or resume a session to begin."
+                                   TextWrapping="NoWrap"
+                                   SizeChanged="StatusText_SizeChanged">
+                            <TextBlock.RenderTransform>
+                                <TranslateTransform x:Name="statusTextTransform"/>
+                            </TextBlock.RenderTransform>
+                        </TextBlock>
+                    </Canvas>
                 </Grid>
             </StatusBarItem>
         </StatusBar>

@@ -284,11 +284,16 @@ internal static class UiChecks
 			"The status bar buttons must remain inside the status bar.");
 		Check.True(text.ActualWidth > viewport.ActualWidth,
 			"The marquee check requires status text wider than its dynamic viewport.");
+		Check.True(VisualTreeHelper.GetClip(text) is null,
+			"The complete status string must remain unclipped inside the marquee viewport.");
 
 		var firstPosition = transform.X;
-		await Task.Delay(300);
-		Check.True(transform.X < firstPosition - 1,
-			"Overflowing status text must move slowly from right to left.");
+		var movementTimer = System.Diagnostics.Stopwatch.StartNew();
+		await Task.Delay(600);
+		movementTimer.Stop();
+		var measuredSpeed = (firstPosition - transform.X) / movementTimer.Elapsed.TotalSeconds;
+		Check.True(measuredSpeed is >= 29 and <= 45,
+			$"Overflowing status text must move right to left near 36 pixels per second, measured {measuredSpeed:0.0}.");
 
 		var narrowViewportWidth = viewport.ActualWidth;
 		window.Width = 700;
