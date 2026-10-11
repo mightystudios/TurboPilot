@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.IO;
 using System.Text;
 using System.Text.Json;
 using System.Windows;
@@ -41,10 +42,18 @@ public partial class MainWindow : TurbolandWindow
 	private readonly System.Windows.Documents.Run _rawOutputRun = new();
 
 	// Attachments tracking
+	private const double DefaultImagePreviewHeight = 92;
+	private const double MinimumImagePreviewHeight = 48;
+	private const double MinimumPromptTextHeight = 40;
+	private static readonly HashSet<string> PreviewImageExtensions = new(StringComparer.OrdinalIgnoreCase)
+	{
+		".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp",
+	};
 	private readonly List<string> _attachments = new();
 	private readonly HashSet<string> _temporaryAttachments = new(StringComparer.OrdinalIgnoreCase);
-	private readonly Dictionary<string, FrameworkElement> _pastedImagePreviews =
+	private readonly Dictionary<string, FrameworkElement> _imagePreviews =
 		new(StringComparer.OrdinalIgnoreCase);
+	private double _imagePreviewHeight = DefaultImagePreviewHeight;
 	private PromptReferenceCompletion? _referenceCompletion;
 	private string? _firstAttachmentPickerDirectory;
 
@@ -241,7 +250,8 @@ public partial class MainWindow : TurbolandWindow
 	{
 		var totalHeight = OutputRow.ActualHeight + InputRow.ActualHeight;
 		const double minOutput = 80;
-		var minInput = 40 + labelUserPrompt.ActualHeight
+		var fixedPromptHeight = Math.Max(0, promptInputGrid.ActualHeight - PromptTextRow.ActualHeight);
+		var minInput = MinimumPromptTextHeight + fixedPromptHeight
 			+ promptInputGrid.Margin.Top + promptInputGrid.Margin.Bottom;
 		if (totalHeight < minOutput + minInput) return;
 
@@ -249,6 +259,28 @@ public partial class MainWindow : TurbolandWindow
 		// Pixel heights would leave unused space after the window grows.
 		OutputRow.Height = new GridLength(outputHeight, GridUnitType.Star);
 		InputRow.Height = new GridLength(totalHeight - outputHeight, GridUnitType.Star);
+	}
+
+	private void ImagePreviewSplitter_DragDelta(
+		object sender,
+		System.Windows.Controls.Primitives.DragDeltaEventArgs e)
+	{
+		if (imagePreviewScroll.Visibility != Visibility.Visible)
+			return;
+
+		var availableHeight = PromptTextRow.ActualHeight + ImagePreviewRow.ActualHeight;
+		var maximumPreviewHeight = availableHeight - MinimumPromptTextHeight;
+		if (maximumPreviewHeight <= 0)
+			return;
+
+		var minimumPreviewHeight = Math.Min(MinimumImagePreviewHeight, maximumPreviewHeight);
+		_imagePreviewHeight = Math.Clamp(
+			ImagePreviewRow.ActualHeight - e.VerticalChange,
+			minimumPreviewHeight,
+			maximumPreviewHeight);
+		PromptTextRow.Height = new GridLength(1, GridUnitType.Star);
+		ImagePreviewRow.Height = new GridLength(_imagePreviewHeight);
+		e.Handled = true;
 	}
 
 	// ── Attachments ──────────────────────────────────────────────────────────
@@ -304,15 +336,30 @@ public partial class MainWindow : TurbolandWindow
 		}
 
 		var added = 0;
+		var previewFailures = new List<string>();
 		foreach (var file in files)
 		{
 			if (_attachments.Contains(file, StringComparer.OrdinalIgnoreCase))
 				continue;
 			_attachments.Add(file);
 			added++;
+			try
+			{
+				AddDroppedImagePreview(file);
+			}
+			catch (Exception ex) when (ex is IOException
+				or UnauthorizedAccessException
+				or FileFormatException
+				or NotSupportedException
+				or System.Runtime.InteropServices.COMException)
+			{
+				previewFailures.Add($"{System.IO.Path.GetFileName(file)}: {ex.Message}");
+			}
 		}
 		if (added > 0)
 			UpdateAttachmentButton();
+		if (previewFailures.Count > 0)
+			ShowNotice("Cannot preview dropped image: " + string.Join("; ", previewFailures));
 		return added > 0;
 	}
 
@@ -322,7 +369,7 @@ public partial class MainWindow : TurbolandWindow
 	/// </summary>
 	private void UpdateAttachmentButton()
 	{
-		PruneClipboardImageAttachments();
+		PruneImagePreviews();
 		buttonAttachments.Content = $"+{_attachments.Count}";
 		RefreshPromptCompletion();
 	}
@@ -332,50 +379,133 @@ public partial class MainWindow : TurbolandWindow
 		var path = ClipboardImageAttachment.SavePng(image);
 		try
 		{
-			var preview = new System.Windows.Controls.Image
-			{
-				Source = image,
-				MaxWidth = 120,
-				MaxHeight = 80,
-				Stretch = System.Windows.Media.Stretch.Uniform,
-				Margin = new Thickness(4, 4, 4, 2),
-				ToolTip = path,
-				SnapsToDevicePixels = true,
-			};
-
 			_attachments.Add(path);
 			_temporaryAttachments.Add(path);
-			_pastedImagePreviews.Add(path, preview);
-			imagePreviewPanel.Children.Add(preview);
-			imagePreviewScroll.Visibility = Visibility.Visible;
+			AddImagePreview(path, image);
 			UpdateAttachmentButton();
 		}
 		catch
 		{
 			_attachments.RemoveAll(item => string.Equals(item, path, StringComparison.OrdinalIgnoreCase));
 			_temporaryAttachments.Remove(path);
-			if (_pastedImagePreviews.Remove(path, out var preview))
+			if (_imagePreviews.Remove(path, out var preview))
 				imagePreviewPanel.Children.Remove(preview);
 			ClipboardImageAttachment.TryDelete(path);
+			UpdateImagePreviewVisibility();
 			throw;
 		}
 	}
 
-	private void PruneClipboardImageAttachments()
+	private void AddDroppedImagePreview(string path)
 	{
+		if (!PreviewImageExtensions.Contains(System.IO.Path.GetExtension(path))
+			|| _imagePreviews.ContainsKey(path))
+		{
+			return;
+		}
+
+		using var stream = new FileStream(
+			path,
+			FileMode.Open,
+			FileAccess.Read,
+			FileShare.ReadWrite | FileShare.Delete);
+		var image = System.Windows.Media.Imaging.BitmapFrame.Create(
+			stream,
+			System.Windows.Media.Imaging.BitmapCreateOptions.PreservePixelFormat,
+			System.Windows.Media.Imaging.BitmapCacheOption.OnLoad);
+		if (image.CanFreeze)
+			image.Freeze();
+		AddImagePreview(path, image);
+	}
+
+	private void AddImagePreview(string path, System.Windows.Media.Imaging.BitmapSource image)
+	{
+		if (_imagePreviews.ContainsKey(path))
+			return;
+
+		var preview = new System.Windows.Controls.Image
+		{
+			Source = image,
+			Stretch = System.Windows.Media.Stretch.Uniform,
+			Margin = new Thickness(4, 4, 4, 2),
+			ToolTip = path,
+			SnapsToDevicePixels = true,
+		};
+
+		_imagePreviews.Add(path, preview);
+		imagePreviewPanel.Children.Add(preview);
+		UpdateImagePreviewVisibility();
+		UpdateImagePreviewSizes();
+	}
+
+	private void PruneImagePreviews()
+	{
+		foreach (var path in _imagePreviews.Keys
+			.Where(path => !_attachments.Contains(path, StringComparer.OrdinalIgnoreCase))
+			.ToArray())
+		{
+			var preview = _imagePreviews[path];
+			_imagePreviews.Remove(path);
+			imagePreviewPanel.Children.Remove(preview);
+		}
+
 		foreach (var path in _temporaryAttachments
 			.Where(path => !_attachments.Contains(path, StringComparer.OrdinalIgnoreCase))
 			.ToArray())
 		{
-			if (_pastedImagePreviews.Remove(path, out var preview))
-				imagePreviewPanel.Children.Remove(preview);
 			_temporaryAttachments.Remove(path);
 			ClipboardImageAttachment.TryDelete(path);
 		}
 
-		imagePreviewScroll.Visibility = imagePreviewPanel.Children.Count == 0
-			? Visibility.Collapsed
-			: Visibility.Visible;
+		UpdateImagePreviewVisibility();
+	}
+
+	private void UpdateImagePreviewVisibility()
+	{
+		if (imagePreviewPanel.Children.Count == 0)
+		{
+			imagePreviewSplitter.Visibility = Visibility.Collapsed;
+			imagePreviewScroll.Visibility = Visibility.Collapsed;
+			ImagePreviewRow.Height = new GridLength(0);
+			return;
+		}
+
+		if (imagePreviewScroll.Visibility != Visibility.Visible)
+		{
+			var availableHeight = PromptTextRow.ActualHeight + ImagePreviewRow.ActualHeight;
+			if (availableHeight > MinimumPromptTextHeight)
+			{
+				var maximumPreviewHeight = availableHeight - MinimumPromptTextHeight;
+				_imagePreviewHeight = Math.Clamp(
+					_imagePreviewHeight,
+					Math.Min(MinimumImagePreviewHeight, maximumPreviewHeight),
+					maximumPreviewHeight);
+			}
+			ImagePreviewRow.Height = new GridLength(_imagePreviewHeight);
+		}
+		imagePreviewSplitter.Visibility = Visibility.Visible;
+		imagePreviewScroll.Visibility = Visibility.Visible;
+	}
+
+	private void ImagePreviewScroll_SizeChanged(object sender, SizeChangedEventArgs e) =>
+		UpdateImagePreviewSizes(e.NewSize.Height);
+
+	private void UpdateImagePreviewSizes() =>
+		UpdateImagePreviewSizes(imagePreviewScroll.ActualHeight);
+
+	private void UpdateImagePreviewSizes(double availableHeight)
+	{
+		if (availableHeight <= 0)
+			return;
+
+		foreach (var preview in imagePreviewPanel.Children.OfType<System.Windows.Controls.Image>())
+		{
+			var height = Math.Max(
+				1,
+				availableHeight - preview.Margin.Top - preview.Margin.Bottom);
+			preview.Height = height;
+			preview.MaxWidth = height * 2;
+		}
 	}
 
 	// ── WebView2 initialization ──────────────────────────────────────────────
@@ -2151,7 +2281,7 @@ public partial class MainWindow : TurbolandWindow
 	protected override void OnClosed(EventArgs e)
 	{
 		_attachments.Clear();
-		PruneClipboardImageAttachments();
+		PruneImagePreviews();
 		webViewOutput.Dispose();
 		base.OnClosed(e);
 	}

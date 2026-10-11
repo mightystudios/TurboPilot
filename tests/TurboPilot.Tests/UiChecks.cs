@@ -10,6 +10,7 @@ using System.Windows.Media;
 using System.Windows.Media.Imaging;
 using System.Windows.Threading;
 using Microsoft.Web.WebView2.Wpf;
+using TurboPilot.Attachments;
 using TurboPilot.Ai;
 using TurboPilot.Customizations;
 using TurboPilot.Dialogs;
@@ -647,7 +648,7 @@ internal static class UiChecks
 		var input = Control<RichTextBox>(window, "richTextBoxInput");
 		var width = window.ActualWidth;
 
-		CheckPromptPaste(window);
+		await CheckPromptPasteAsync(window);
 
 		Check.True(!popup.IsOpen, "The command list stays shut until a command is typed.");
 		SetInput(window, "just a message");
@@ -736,11 +737,11 @@ internal static class UiChecks
 	/// <summary>CLIPBRD_E_CANT_OPEN: some other program has the clipboard open.</summary>
 	private const int ClipboardHeldElsewhere = unchecked((int)0x800401D0);
 
-	private static void CheckPromptPaste(MainWindow window)
+	private static async Task CheckPromptPasteAsync(MainWindow window)
 	{
 		CheckPlainTextPaste(window);
-		CheckImagePaste(window);
-		Console.WriteLine("PASS plain-text paste and clipboard image attachment preview");
+		await CheckImagePasteAsync(window);
+		Console.WriteLine("PASS plain-text paste and resizable clipboard image attachment preview");
 	}
 
 	private static void CheckPlainTextPaste(MainWindow window)
@@ -804,12 +805,16 @@ internal static class UiChecks
 		}
 	}
 
-	private static void CheckImagePaste(MainWindow window)
+	private static async Task CheckImagePasteAsync(MainWindow window)
 	{
 		var input = Control<RichTextBox>(window, "richTextBoxInput");
 		var previousInput = Input(window);
 		var attachments = Field<List<string>>(window, "_attachments");
 		var previousAttachments = attachments.ToArray();
+		var previews = Control<StackPanel>(window, "imagePreviewPanel");
+		var previewScroll = Control<ScrollViewer>(window, "imagePreviewScroll");
+		var previewSplitter = Control<Thumb>(window, "imagePreviewSplitter");
+		var previewRow = Control<RowDefinition>(window, "ImagePreviewRow");
 		string? pastedPath = null;
 
 		try
@@ -831,8 +836,6 @@ internal static class UiChecks
 			Invoke(window, "Input_Pasting", input, paste);
 
 			pastedPath = attachments.Except(previousAttachments, StringComparer.OrdinalIgnoreCase).Single();
-			var previews = Control<StackPanel>(window, "imagePreviewPanel");
-			var previewScroll = Control<ScrollViewer>(window, "imagePreviewScroll");
 			Check.True(File.Exists(pastedPath)
 				&& Path.GetExtension(pastedPath).Equals(".png", StringComparison.OrdinalIgnoreCase),
 				"Persist a clipboard image as a temporary PNG attachment.");
@@ -840,9 +843,40 @@ internal static class UiChecks
 				Control<Button>(window, "buttonAttachments").Content,
 				"Count a pasted image as a pending attachment.");
 			Check.True(previewScroll.Visibility == Visibility.Visible
+				&& previewSplitter.Visibility == Visibility.Visible
 				&& previews.Children.OfType<Image>().Single().Source is not null,
 				"Show a thumbnail for the pasted image in the prompt pane.");
 			Check.Equal(string.Empty, Input(window), "Do not insert binary clipboard content as prompt text.");
+
+			await window.Dispatcher.InvokeAsync(window.UpdateLayout, DispatcherPriority.ApplicationIdle);
+			var preview = previews.Children.OfType<Image>().Single();
+			var originalPreviewHeight = previewRow.ActualHeight;
+			var originalThumbnailHeight = preview.ActualHeight;
+			var originalInputHeight = input.ActualHeight;
+
+			previewSplitter.RaiseEvent(new DragDeltaEventArgs(0, -32)
+				{ RoutedEvent = Thumb.DragDeltaEvent });
+			await window.Dispatcher.InvokeAsync(window.UpdateLayout, DispatcherPriority.ApplicationIdle);
+			var expandedPreviewHeight = previewRow.ActualHeight;
+			var expandedThumbnailHeight = preview.ActualHeight;
+			var reducedInputHeight = input.ActualHeight;
+			Check.True(previewRow.ActualHeight > originalPreviewHeight + 30
+				&& preview.ActualHeight > originalThumbnailHeight + 20
+				&& input.ActualHeight < originalInputHeight - 30,
+				"Dragging the image divider up enlarges the preview area and its thumbnail. "
+				+ $"Preview {originalPreviewHeight:0.##}->{expandedPreviewHeight:0.##}, "
+				+ $"thumbnail {originalThumbnailHeight:0.##}->{expandedThumbnailHeight:0.##}, "
+				+ $"prompt {originalInputHeight:0.##}->{reducedInputHeight:0.##}.");
+
+			var enlargedPreviewHeight = expandedPreviewHeight;
+			var enlargedThumbnailHeight = expandedThumbnailHeight;
+			previewSplitter.RaiseEvent(new DragDeltaEventArgs(0, 48)
+				{ RoutedEvent = Thumb.DragDeltaEvent });
+			await window.Dispatcher.InvokeAsync(window.UpdateLayout, DispatcherPriority.ApplicationIdle);
+			Check.True(previewRow.ActualHeight < enlargedPreviewHeight - 46
+				&& preview.ActualHeight < enlargedThumbnailHeight - 30
+				&& input.ActualHeight > originalInputHeight,
+				"Dragging the image divider down shrinks the preview area and returns space to the prompt.");
 		}
 		finally
 		{
@@ -852,8 +886,13 @@ internal static class UiChecks
 			SetInput(window, previousInput);
 		}
 
+		await window.Dispatcher.InvokeAsync(window.UpdateLayout, DispatcherPriority.ApplicationIdle);
 		Check.True(pastedPath is not null && !File.Exists(pastedPath),
 			"Delete a temporary image when it leaves pending attachments.");
+		Check.True(previewScroll.Visibility == Visibility.Collapsed
+			&& previewSplitter.Visibility == Visibility.Collapsed
+			&& previewRow.ActualHeight == 0,
+			"Remove the image preview area and divider when no thumbnails remain.");
 	}
 
 	private static void CheckFileDrop(MainWindow window, TestWorkspace workspace)
@@ -862,8 +901,18 @@ internal static class UiChecks
 		var attachments = Field<List<string>>(window, "_attachments");
 		var previousAttachments = attachments.ToArray();
 		var file = workspace.Write("workspace\\dropped-file.txt", "dropped");
+		var image = BitmapSource.Create(
+			2,
+			1,
+			96,
+			96,
+			PixelFormats.Bgra32,
+			null,
+			new byte[] { 255, 0, 0, 255, 0, 255, 255, 255 },
+			8);
+		var imageFile = ClipboardImageAttachment.SavePng(image, workspace.Workspace);
 		var data = new DataObject();
-		data.SetData(DataFormats.FileDrop, new[] { file });
+		data.SetData(DataFormats.FileDrop, new[] { file, imageFile });
 
 		try
 		{
@@ -872,13 +921,19 @@ internal static class UiChecks
 				"Add a dropped file to pending attachments.");
 			Check.True(attachments.Contains(file, StringComparer.OrdinalIgnoreCase),
 				"Keep the dropped file in the pending attachment list.");
-			Check.Equal($"+{previousAttachments.Length + 1}",
+			Check.True(attachments.Contains(imageFile, StringComparer.OrdinalIgnoreCase),
+				"Keep the dropped image in the pending attachment list.");
+			Check.True(Control<StackPanel>(window, "imagePreviewPanel").Children
+				.OfType<Image>()
+				.Any(preview => string.Equals(preview.ToolTip as string, imageFile, StringComparison.OrdinalIgnoreCase)),
+				"Show a thumbnail for a dropped image.");
+			Check.Equal($"+{previousAttachments.Length + 2}",
 				Control<Button>(window, "buttonAttachments").Content,
 				"Update the pending attachment count after a file drop.");
 			Check.True(!(bool)Invoke(window, "AddDroppedFiles", data)!,
 				"Do not add the same dropped file twice.");
-			Check.Equal(previousAttachments.Length + 1, attachments.Count,
-				"Keep one pending entry for a duplicate drop.");
+			Check.Equal(previousAttachments.Length + 2, attachments.Count,
+				"Keep one pending entry for each duplicate drop.");
 		}
 		finally
 		{
@@ -886,7 +941,7 @@ internal static class UiChecks
 			attachments.AddRange(previousAttachments);
 			Invoke(window, "UpdateAttachmentButton");
 		}
-		Console.WriteLine("PASS prompt file drop attachment");
+		Console.WriteLine("PASS prompt file drop attachment and image preview");
 	}
 
 	/// <summary>

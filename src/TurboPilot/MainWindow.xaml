@@ -215,8 +215,9 @@
 
                 <Grid Grid.Row="1" Grid.Column="1">
                     <Grid.RowDefinitions>
-                        <RowDefinition Height="*"/>
+                        <RowDefinition x:Name="PromptTextRow" Height="*"/>
                         <RowDefinition Height="Auto"/>
+                        <RowDefinition x:Name="ImagePreviewRow" Height="0"/>
                         <RowDefinition Height="Auto"/>
                     </Grid.RowDefinitions>
 
@@ -240,13 +241,21 @@
                             </Style>
                         </RichTextBox.Resources>
                     </RichTextBox>
-					<ScrollViewer x:Name="imagePreviewScroll" Grid.Row="1"
-							Visibility="Collapsed" MaxHeight="92"
+                    <Thumb x:Name="imagePreviewSplitter" Grid.Row="1"
+							Height="4"
+							Visibility="Collapsed"
+							Cursor="SizeNS"
+							Background="#565656"
+							ToolTip="Resize image previews"
+							DragDelta="ImagePreviewSplitter_DragDelta"/>
+					<ScrollViewer x:Name="imagePreviewScroll" Grid.Row="2"
+							Visibility="Collapsed"
 							HorizontalScrollBarVisibility="Auto"
-							VerticalScrollBarVisibility="Disabled">
+							VerticalScrollBarVisibility="Disabled"
+							SizeChanged="ImagePreviewScroll_SizeChanged">
 						<StackPanel x:Name="imagePreviewPanel" Orientation="Horizontal"/>
 					</ScrollViewer>
-                    <TextBlock x:Name="noticeTextBlock" Grid.Row="2" Margin="4,4,4,0"
+                    <TextBlock x:Name="noticeTextBlock" Grid.Row="3" Margin="4,4,4,0"
 							TextWrapping="Wrap" MaxHeight="68" Visibility="Collapsed"
 							Foreground="{DynamicResource Turboland.Brush.WindowForeground}"/>
                     <!-- Prompt completion. The prompt box is at the bottom of
