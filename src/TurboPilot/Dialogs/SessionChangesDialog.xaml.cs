@@ -75,19 +75,20 @@ public partial class SessionChangesDialog : TurbolandFloatingDialog
 	{
 		if (Selected is not { } row) return;
 		if (!WorkspaceChanges.OpenDiffTool(_anchor, row.Change.Path))
-			MessageBox.Show(this, "Git could not be started to compare that file.",
-				"Session Changes", MessageBoxButton.OK, MessageBoxImage.Information);
+			MessageDialog.Ok(this,
+				"Git could not be started to compare that file.",
+				"Session Changes");
 	}
 
 	private void OnRevert(object sender, RoutedEventArgs e)
 	{
 		if (Selected is not { } row) return;
-		if (MessageBox.Show(this, $"Discard the changes to this file and put it back as it was?\r\n\r\n{row.Change.Path}",
-			"Session Changes", MessageBoxButton.YesNo, MessageBoxImage.Question) != MessageBoxResult.Yes)
+		if (!YesNoDialog.Ask(this,
+			$"Discard the changes to this file and put it back as it was?\r\n\r\n{row.Change.Path}",
+			"Session Changes"))
 			return;
 		if (!WorkspaceChanges.Revert(_anchor, row.Change.Path))
-			MessageBox.Show(this, "Could not put that file back.",
-				"Session Changes", MessageBoxButton.OK, MessageBoxImage.Warning);
+			MessageDialog.Ok(this, "Could not put that file back.", "Session Changes");
 		Reload();
 	}
 

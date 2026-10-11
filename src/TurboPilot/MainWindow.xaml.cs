@@ -1998,8 +1998,9 @@ public partial class MainWindow : TurbolandWindow
 			chat.AddNotice(NoticeFormatter.Status("revert", reason));
 			return;
 		}
-		if (MessageBox.Show(this, "Discard the changes to this file and put it back as it was?\r\n\r\n" + path,
-			"Undo Change", MessageBoxButton.YesNo, MessageBoxImage.Question) != MessageBoxResult.Yes)
+		if (!YesNoDialog.Ask(this,
+			"Discard the changes to this file and put it back as it was?\r\n\r\n" + path,
+			"Undo Change"))
 			return;
 
 		chat.AddNotice(WorkspaceChanges.Revert(anchor, path)

@@ -49,7 +49,7 @@ public partial class PermissionsDialog : TurbolandFloatingDialog
 	private bool _dirty;
 	private bool _loading;
 
-	// True while the discard confirmation is on screen. The modal box
+	// True while the discard confirmation is on screen. The modal dialog
 	// blocks mouse input, but a programmatic close attempt (or a stray
 	// accelerator) must not call Close again mid-close.
 	private bool _confirming;
@@ -146,23 +146,21 @@ public partial class PermissionsDialog : TurbolandFloatingDialog
 		string path = textBoxFolder.Text?.Trim().Trim('"') ?? string.Empty;
 		if (path.Length == 0)
 		{
-			Notify("Type a folder path, or use Browse to pick one.",
-				MessageBoxImage.Information);
+			Notify("Type a folder path, or use Browse to pick one.");
 			textBoxFolder.Focus();
 			return;
 		}
 
 		if (_rows.Any(r => string.Equals(r.FolderPath, path, StringComparison.OrdinalIgnoreCase)))
 		{
-			Notify("That path is already in the list.", MessageBoxImage.Information);
+			Notify("That path is already in the list.");
 			return;
 		}
 
 		// The workspace needs no grant: everything inside it is accessible.
 		if (_workspace is not null && PermissionMatcher.IsUnder(path, _workspace))
 		{
-			Notify("That folder is inside the workspace, which is always accessible.",
-				MessageBoxImage.Information);
+			Notify("That folder is inside the workspace, which is always accessible.");
 			return;
 		}
 
@@ -216,9 +214,9 @@ public partial class PermissionsDialog : TurbolandFloatingDialog
 			return;
 
 		var row = _rows[i];
-		var answer = MessageBox.Show(this, $"Remove {row.FolderPath}, are you sure?",
-			"Permissions", MessageBoxButton.YesNo, MessageBoxImage.Question);
-		if (answer != MessageBoxResult.Yes)
+		if (!YesNoDialog.Ask(this,
+			$"Remove {row.FolderPath}, are you sure?",
+			"Permissions"))
 			return;
 
 		_rows.RemoveAt(i);
@@ -362,9 +360,9 @@ public partial class PermissionsDialog : TurbolandFloatingDialog
 			_confirming = true;
 			try
 			{
-				if (MessageBox.Show(this, "You have unsaved changes. Discard them?",
-					"Permissions", MessageBoxButton.YesNo, MessageBoxImage.Question)
-					!= MessageBoxResult.Yes)
+				if (!YesNoDialog.Ask(this,
+					"You have unsaved changes. Discard them?",
+					"Permissions"))
 				{
 					e.Cancel = true;
 				}
@@ -387,8 +385,8 @@ public partial class PermissionsDialog : TurbolandFloatingDialog
 		Title = $"{_baseTitle} *";
 	}
 
-	private void Notify(string message, MessageBoxImage icon)
-		=> MessageBox.Show(this, message, "Permissions", MessageBoxButton.OK, icon);
+	private void Notify(string message)
+		=> MessageDialog.Ok(this, message, "Permissions");
 
 	// ------------------------------------------------------------------ options file
 
@@ -418,7 +416,7 @@ public partial class PermissionsDialog : TurbolandFloatingDialog
 		catch (Exception ex) when (ex is IOException or UnauthorizedAccessException
 			or System.Security.SecurityException)
 		{
-			Notify($"Could not save the options file:\r\n{ex.Message}", MessageBoxImage.Warning);
+			Notify($"Could not save the options file:\r\n{ex.Message}");
 		}
 	}
 
@@ -442,7 +440,7 @@ public partial class PermissionsDialog : TurbolandFloatingDialog
 		catch (Exception ex) when (ex is IOException or UnauthorizedAccessException
 			or System.Security.SecurityException or System.Text.Json.JsonException)
 		{
-			Notify($"Could not read the options file:\r\n{ex.Message}", MessageBoxImage.Warning);
+			Notify($"Could not read the options file:\r\n{ex.Message}");
 			return;
 		}
 

@@ -182,6 +182,82 @@ internal static class UiChecks
 		finally { application.DispatcherUnhandledException -= OnUnhandled; }
 	}
 
+	/// <summary>
+	/// Application messages must stay inside the Turboland window family.
+	/// The empty Permissions Add action is the shortest informational path,
+	/// and closing the now-dirty dialog exercises its two-answer path.
+	/// </summary>
+	private static void CheckThemedMessageDialogs(Application application, MainWindow window, TestWorkspace workspace)
+	{
+		var dialog = new PermissionsDialog(workspace.Workspace) { Owner = window };
+		try
+		{
+			dialog.Show();
+			dialog.UpdateLayout();
+
+			string? messageTitle = null;
+			string? messageText = null;
+			Window? messageOwner = null;
+			using (DialogAction<MessageDialog>(application, message =>
+			{
+				messageTitle = message.Title;
+				messageText = Control<TextBlock>(message, "Message").Text;
+				messageOwner = message.Owner;
+				Invoke(message, "OnOk", message, new RoutedEventArgs());
+			}))
+			{
+				Invoke(dialog, "OnAdd", dialog, new RoutedEventArgs());
+			}
+
+			Check.Equal("Permissions", messageTitle, "Use the Permissions title on its themed message");
+			Check.Equal("Type a folder path, or use Browse to pick one.", messageText,
+				"Show the empty-path explanation in the themed message");
+			Check.True(ReferenceEquals(dialog, messageOwner),
+				"Own the themed message with the Permissions dialog.");
+			Check.True(dialog.IsVisible, "Acknowledging the message must leave Permissions open.");
+
+			Control<TextBox>(dialog, "textBoxFolder").Text = Path.Combine(workspace.Root, "allowed");
+			Invoke(dialog, "OnAdd", dialog, new RoutedEventArgs());
+
+			string? confirmTitle = null;
+			string? confirmText = null;
+			Window? confirmOwner = null;
+			using (DialogAction<YesNoDialog>(application, confirm =>
+			{
+				confirmTitle = confirm.Title;
+				confirmText = Control<TextBlock>(confirm, "Message").Text;
+				confirmOwner = confirm.Owner;
+				Invoke(confirm, "OnNo", confirm, new RoutedEventArgs());
+			}))
+			{
+				dialog.Close();
+			}
+
+			Check.Equal("Permissions", confirmTitle, "Use the Permissions title on its themed confirmation");
+			Check.Equal("You have unsaved changes. Discard them?", confirmText,
+				"Show the discard question in the themed confirmation");
+			Check.True(ReferenceEquals(dialog, confirmOwner),
+				"Own the themed confirmation with the Permissions dialog.");
+			Check.True(dialog.IsVisible, "Declining the discard confirmation must keep Permissions open.");
+
+			using (DialogAction<YesNoDialog>(application,
+				confirm => Invoke(confirm, "OnYes", confirm, new RoutedEventArgs())))
+			{
+				dialog.Close();
+			}
+			Check.True(!dialog.IsVisible, "Accepting the discard confirmation must close Permissions.");
+			Console.WriteLine("PASS application messages use themed one-button and yes/no dialogs");
+		}
+		finally
+		{
+			if (dialog.IsLoaded)
+			{
+				SetField(dialog, "_dirty", false);
+				dialog.Close();
+			}
+		}
+	}
+
 	private static async Task CheckRenderedUserPromptStyleAsync(MainWindow window, WebView2 webView)
 	{
 		window.ClearOutput();
@@ -271,6 +347,7 @@ internal static class UiChecks
 			await window.Dispatcher.InvokeAsync(() => { }, DispatcherPriority.Loaded);
 			await CheckPromptLayoutAsync(window);
 			await CheckRenderedUserPromptStyleAsync(window, webView);
+			CheckThemedMessageDialogs(application, window, workspace);
 
 			var starting = InvokeTask(window, "StartChatAsync", options, null);
 			Check.True(Status(window).StartsWith("Starting.."), "Show Starting while connecting.");

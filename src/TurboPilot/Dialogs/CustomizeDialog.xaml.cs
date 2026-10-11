@@ -146,8 +146,7 @@ public partial class CustomizeDialog : TurbolandFloatingDialog
 
 		if (IsDuplicate(trimmed))
 		{
-			MessageBox.Show(this, "That folder is already in the list.",
-				"Customization", MessageBoxButton.OK, MessageBoxImage.Information);
+			MessageDialog.Ok(this, "That folder is already in the list.", "Customization");
 			return;
 		}
 
@@ -164,9 +163,7 @@ public partial class CustomizeDialog : TurbolandFloatingDialog
 			return;
 
 		var path = _folders[i];
-		var answer = MessageBox.Show(this, $"Delete {path}, are you sure?",
-			"Customization", MessageBoxButton.YesNo, MessageBoxImage.Question);
-		if (answer != MessageBoxResult.Yes)
+		if (!YesNoDialog.Ask(this, $"Delete {path}, are you sure?", "Customization"))
 			return;
 
 		_folders.RemoveAt(i);
@@ -456,9 +453,9 @@ public partial class CustomizeDialog : TurbolandFloatingDialog
 			_confirming = true;
 			try
 			{
-				if (MessageBox.Show(this, "You have unsaved changes. Discard them?",
-					"Customization", MessageBoxButton.YesNo, MessageBoxImage.Question)
-					!= MessageBoxResult.Yes)
+				if (!YesNoDialog.Ask(this,
+					"You have unsaved changes. Discard them?",
+					"Customization"))
 				{
 					e.Cancel = true;
 				}
@@ -508,8 +505,9 @@ public partial class CustomizeDialog : TurbolandFloatingDialog
 		catch (Exception ex) when (ex is IOException or UnauthorizedAccessException
 			or System.Security.SecurityException)
 		{
-			MessageBox.Show(this, $"Could not save the options file:\r\n{ex.Message}",
-				"Customization", MessageBoxButton.OK, MessageBoxImage.Warning);
+			MessageDialog.Ok(this,
+				$"Could not save the options file:\r\n{ex.Message}",
+				"Customization");
 		}
 	}
 
@@ -533,8 +531,9 @@ public partial class CustomizeDialog : TurbolandFloatingDialog
 		catch (Exception ex) when (ex is IOException or UnauthorizedAccessException
 			or System.Security.SecurityException or System.Text.Json.JsonException)
 		{
-			MessageBox.Show(this, $"Could not read the options file:\r\n{ex.Message}",
-				"Customization", MessageBoxButton.OK, MessageBoxImage.Warning);
+			MessageDialog.Ok(this,
+				$"Could not read the options file:\r\n{ex.Message}",
+				"Customization");
 			return;
 		}
 
