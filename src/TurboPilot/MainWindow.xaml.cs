@@ -4,6 +4,7 @@ using System.Text;
 using System.Text.Json;
 using System.Windows;
 using System.Windows.Media;
+using System.Windows.Media.Animation;
 using Microsoft.Web.WebView2.Wpf;
 using TurbolandTheme.Wpf.Controls;
 using TurboPilot.Attachments;
@@ -92,11 +93,14 @@ public partial class MainWindow : TurbolandWindow
 
 	// Status line state: a short base phrase plus elapsed time, task
 	// progress, and usage suffixes.
+	private const double StatusMarqueePixelsPerSecond = 24;
+	private const double StatusMarqueeOverflowTolerance = 0.5;
 	private string _statusBase = "Ready..";
 	private int _ctxUsed;
 	private int _ctxTotal;
 	private double _aic;
 	private bool _showAic;
+	private bool _statusMarqueeUpdatePending;
 
 	public MainWindow() : this(new SessionStore())
 	{
@@ -1525,12 +1529,56 @@ public partial class MainWindow : TurbolandWindow
 	{
 		if (!IsSessionActive)
 		{
-			statusTextBlock.Text = "Start or resume a session to begin.";
+			SetStatusText("Start or resume a session to begin.");
 			return;
 		}
 
-		statusTextBlock.Text = FormatStatus(_statusBase, _ctxUsed, _ctxTotal, _aic, _showAic,
-			_chat?.Progress, _chat?.OperationElapsed);
+		SetStatusText(FormatStatus(_statusBase, _ctxUsed, _ctxTotal, _aic, _showAic,
+			_chat?.Progress, _chat?.OperationElapsed));
+	}
+
+	private void SetStatusText(string text)
+	{
+		statusTextBlock.Text = text;
+		QueueStatusMarqueeUpdate();
+	}
+
+	private void StatusText_SizeChanged(object sender, SizeChangedEventArgs e) =>
+		QueueStatusMarqueeUpdate();
+
+	private void QueueStatusMarqueeUpdate()
+	{
+		if (_statusMarqueeUpdatePending)
+			return;
+
+		_statusMarqueeUpdatePending = true;
+		Dispatcher.BeginInvoke(new Action(() =>
+		{
+			_statusMarqueeUpdatePending = false;
+			UpdateStatusMarquee();
+		}), System.Windows.Threading.DispatcherPriority.Loaded);
+	}
+
+	private void UpdateStatusMarquee()
+	{
+		statusTextTransform.BeginAnimation(TranslateTransform.XProperty, null);
+		statusTextTransform.X = 0;
+
+		var viewportWidth = statusTextViewport.ActualWidth;
+		var textWidth = statusTextBlock.ActualWidth;
+		if (viewportWidth <= 0 || textWidth <= viewportWidth + StatusMarqueeOverflowTolerance)
+			return;
+
+		var travelDistance = viewportWidth + textWidth;
+		var animation = new DoubleAnimation
+		{
+			From = viewportWidth,
+			To = -textWidth,
+			Duration = TimeSpan.FromSeconds(travelDistance / StatusMarqueePixelsPerSecond),
+			RepeatBehavior = RepeatBehavior.Forever,
+		};
+		statusTextTransform.BeginAnimation(TranslateTransform.XProperty, animation,
+			HandoffBehavior.SnapshotAndReplace);
 	}
 
 	/// <summary>

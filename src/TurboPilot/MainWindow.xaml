@@ -92,21 +92,36 @@
             </MenuItem>
         </Menu>
 
-        <StatusBar DockPanel.Dock="Bottom" Height="43">
-            <StatusBarItem x:Name="statusBarItem">
-                <TextBlock x:Name="statusTextBlock" Text="Start or resume a session to begin."/>
+        <StatusBar x:Name="statusBar" DockPanel.Dock="Bottom" Height="43">
+            <!-- StatusBar uses a DockPanel. Reserve the button strip first,
+                 then let the final item fill only the width that remains. -->
+            <StatusBarItem x:Name="statusButtonsItem" DockPanel.Dock="Right">
+                <StackPanel x:Name="statusButtons" Orientation="Horizontal" VerticalAlignment="Center" Margin="0,0,5,0">
+                    <!-- Session-dependent controls: enabled and disabled in bulk
+                         by SetSessionActive, not here. No explicit colors: local
+                         values would outrank the theme's disabled-state triggers
+                         and leave a disabled button painted in its enabled ink. -->
+                    <Button x:Name="buttonAttachments" Content="+0" Width="40" Height="25" Margin="0,0,5,0"
+							ToolTip="manage attachments" Click="ButtonAttachments_Click"/>
+                    <Button x:Name="buttonStop" Content="Stop" Width="60" Height="25" Margin="0,0,5,0" Click="ButtonStop_Click"/>
+                    <Button x:Name="buttonSend" Content="Send" Width="80" Height="25" Click="ButtonSend_Click"/>
+                </StackPanel>
             </StatusBarItem>
-            <!-- Buttons on the right side of the toolbar -->
-            <StackPanel Grid.Column="1" Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Center" Margin="0,0,5,0">
-                <!-- Session-dependent controls: enabled and disabled in bulk
-                     by SetSessionActive, not here. No explicit colors: local
-                     values would outrank the theme's disabled-state triggers
-                     and leave a disabled button painted in its enabled ink. -->
-                <Button x:Name="buttonAttachments" Content="+0" Width="40" Height="25" Margin="0,0,5,0"
-						ToolTip="manage attachments" Click="ButtonAttachments_Click"/>
-                <Button x:Name="buttonStop" Content="Stop" Width="60" Height="25" Margin="0,0,5,0" Click="ButtonStop_Click"/>
-                <Button x:Name="buttonSend" Content="Send" Width="80" Height="25" Click="ButtonSend_Click"/>
-            </StackPanel>
+            <StatusBarItem x:Name="statusBarItem" MinWidth="0" HorizontalContentAlignment="Stretch">
+                <Grid x:Name="statusTextViewport" ClipToBounds="True"
+                      SizeChanged="StatusText_SizeChanged">
+                    <TextBlock x:Name="statusTextBlock"
+                               Text="Start or resume a session to begin."
+                               TextWrapping="NoWrap"
+                               HorizontalAlignment="Left"
+                               VerticalAlignment="Center"
+                               SizeChanged="StatusText_SizeChanged">
+                        <TextBlock.RenderTransform>
+                            <TranslateTransform x:Name="statusTextTransform"/>
+                        </TextBlock.RenderTransform>
+                    </TextBlock>
+                </Grid>
+            </StatusBarItem>
         </StatusBar>
 
         <!-- The blue desktop. The dialog host is a sibling laid over the content

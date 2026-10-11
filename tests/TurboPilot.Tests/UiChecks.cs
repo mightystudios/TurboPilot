@@ -258,6 +258,52 @@ internal static class UiChecks
 		}
 	}
 
+	private static async Task CheckStatusMarqueeAsync(MainWindow window)
+	{
+		var bar = Control<StatusBar>(window, "statusBar");
+		var viewport = Control<Grid>(window, "statusTextViewport");
+		var text = Control<TextBlock>(window, "statusTextBlock");
+		var buttons = Control<StackPanel>(window, "statusButtons");
+		var transform = Field<TranslateTransform>(window, "statusTextTransform");
+		var originalWidth = window.Width;
+		const string longStatus =
+			"Working.. [12/20] Implementing a deliberately long status update 145/265K AiC=180";
+
+		window.Width = 520;
+		Invoke(window, "SetStatusText", longStatus);
+		await Check.UntilAsync(() => transform.HasAnimatedProperties,
+			"An overflowing status line did not start its marquee.");
+
+		var viewportBounds = viewport.TransformToAncestor(bar)
+			.TransformBounds(new Rect(viewport.RenderSize));
+		var buttonBounds = buttons.TransformToAncestor(bar)
+			.TransformBounds(new Rect(buttons.RenderSize));
+		Check.True(viewportBounds.Right <= buttonBounds.Left + 0.5,
+			"The status text viewport must stop before the status bar buttons.");
+		Check.True(buttonBounds.Right <= bar.ActualWidth + 0.5,
+			"The status bar buttons must remain inside the status bar.");
+		Check.True(text.ActualWidth > viewport.ActualWidth,
+			"The marquee check requires status text wider than its dynamic viewport.");
+
+		var firstPosition = transform.X;
+		await Task.Delay(300);
+		Check.True(transform.X < firstPosition - 1,
+			"Overflowing status text must move slowly from right to left.");
+
+		var narrowViewportWidth = viewport.ActualWidth;
+		window.Width = 700;
+		await window.Dispatcher.InvokeAsync(() => { }, DispatcherPriority.Loaded);
+		Check.True(viewport.ActualWidth > narrowViewportWidth,
+			"The status text width limit must grow with the resizable window.");
+
+		window.Width = originalWidth;
+		Invoke(window, "SetStatusText", "Start or resume a session to begin.");
+		await window.Dispatcher.InvokeAsync(() => { }, DispatcherPriority.Loaded);
+		Check.True(!transform.HasAnimatedProperties && Math.Abs(transform.X) < 0.01,
+			"Status text that fits must remain stationary.");
+		Console.WriteLine("PASS Dynamic status width and marquee");
+	}
+
 	private static async Task CheckRenderedUserPromptStyleAsync(MainWindow window, WebView2 webView)
 	{
 		window.ClearOutput();
@@ -345,6 +391,7 @@ internal static class UiChecks
 			await window.Dispatcher.InvokeAsync(() => { }, DispatcherPriority.Loaded);
 			outputTabs.SelectedIndex = 0;
 			await window.Dispatcher.InvokeAsync(() => { }, DispatcherPriority.Loaded);
+			await CheckStatusMarqueeAsync(window);
 			await CheckPromptLayoutAsync(window);
 			await CheckRenderedUserPromptStyleAsync(window, webView);
 			CheckThemedMessageDialogs(application, window, workspace);
