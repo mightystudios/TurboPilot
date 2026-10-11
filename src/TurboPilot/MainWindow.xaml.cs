@@ -93,7 +93,7 @@ public partial class MainWindow : TurbolandWindow
 
 	// Status line state: a short base phrase plus elapsed time, task
 	// progress, and usage suffixes.
-	private const double StatusMarqueePixelsPerSecond = 36;
+	private const double StatusMarqueePixelsPerSecond = 64;
 	private const double StatusMarqueeOverflowTolerance = 0.5;
 	private string _statusBase = "Ready..";
 	private int _ctxUsed;
