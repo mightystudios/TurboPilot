@@ -598,7 +598,7 @@ public sealed partial class ChatService : IAsyncDisposable
 	{
 		var kind = request.Kind ?? "";
 		if (IsPreApproved(request, kind))
-			return await PermissionHandler.ApproveAll(request, invocation);
+			return await ApprovePermissionAsync(request, invocation);
 
 		var detail = request switch
 		{
@@ -613,13 +613,35 @@ public sealed partial class ChatService : IAsyncDisposable
 			var (text, rendered) = NoticeFormatter.Permission(kind, detail);
 			var response = await AwaitAnswerAsync(text, rendered, ["yes", "no"], allowFreeform: false, isPermission: true);
 			if (response.Answer == "yes")
-				return await PermissionHandler.ApproveAll(request, invocation);
+				return await ApprovePermissionAsync(request, invocation);
 		}
 		catch (OperationCanceledException)
 		{
 			// Ending a turn never grants its outstanding permission requests.
 		}
 		return GitHub.Copilot.Rpc.PermissionDecision.Reject(null);
+	}
+
+	private async Task<GitHub.Copilot.Rpc.PermissionDecision> ApprovePermissionAsync(
+		PermissionRequest request,
+		PermissionInvocation invocation)
+	{
+		if (request is PermissionRequestWrite write)
+		{
+			var path = string.IsNullOrWhiteSpace(write.ResolvedPath) ? write.FileName : write.ResolvedPath;
+			if (!string.IsNullOrWhiteSpace(path))
+			{
+				var turn = _turnAnchor;
+				var session = _sessionAnchor;
+				await Task.Run(() =>
+				{
+					WorkspaceChanges.RecordWriteIntent(turn, path);
+					if (!ReferenceEquals(turn, session))
+						WorkspaceChanges.RecordWriteIntent(session, path, requireSnapshotMatch: true);
+				});
+			}
+		}
+		return await PermissionHandler.ApproveAll(request, invocation);
 	}
 #pragma warning restore GHCP001
 

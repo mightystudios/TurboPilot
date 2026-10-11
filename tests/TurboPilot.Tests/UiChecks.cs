@@ -900,7 +900,7 @@ internal static class UiChecks
 		// repository, is watched by stamp alone, so a file in it still
 		// has no earlier copy, and the reason given has to be that one.
 		var workspace = Field<ChatSessionOptions>(chat, "_options").WorkspaceFolder!;
-		SetField(chat, "_turnAnchor", new ChangeAnchor(workspace, [], new Dictionary<string, long>()));
+		SetField(chat, "_turnAnchor", new ChangeAnchor(workspace, [], new Dictionary<string, FileStamp>()));
 		try
 		{
 			Invoke(window, "HandleChangeAction", "tool|a.txt");
@@ -1052,7 +1052,7 @@ internal static class UiChecks
 		var workspace = Path.Combine(Path.GetTempPath(), "TurboPilot.Tests", "absent-" + Guid.NewGuid().ToString("N"));
 		var anchor = new ChangeAnchor(workspace,
 			[new RepositoryAnchor(Path.Combine(workspace, "checkout"), "checkout/", "HEAD", new HashSet<string>())],
-			new Dictionary<string, long> { ["notes.txt"] = 1 });
+			new Dictionary<string, FileStamp> { ["notes.txt"] = new(0, 1) });
 		var dialog = new SessionChangesDialog(anchor) { Owner = window };
 		try
 		{

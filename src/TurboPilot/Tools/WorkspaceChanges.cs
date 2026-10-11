@@ -1,5 +1,7 @@
+using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.IO;
+using System.Security.Cryptography;
 
 namespace TurboPilot.Tools;
 
@@ -14,6 +16,12 @@ internal sealed record WorkspaceChange(string Path, string Kind)
 		_ => "~",
 	};
 }
+
+/// <summary>Cheap file state used to find possible loose-file changes.</summary>
+internal readonly record struct FileStamp(long Length, long LastWriteTimeUtcTicks);
+
+/// <summary>Verified file content at one point in time.</summary>
+internal sealed record FileContentState(bool Exists, string Hash);
 
 /// <summary>
 /// One repository a turn is measured against: its top folder, where
@@ -34,7 +42,12 @@ internal sealed record RepositoryAnchor(string Root, string Prefix, string Commi
 /// Where the workspace stood when a turn began, so what the turn did to
 /// it can be worked out when the turn ends.
 /// </summary>
-internal sealed class ChangeAnchor(string workspace, IReadOnlyList<RepositoryAnchor> repositories, IReadOnlyDictionary<string, long>? stamps)
+internal sealed class ChangeAnchor(
+	string workspace,
+	IReadOnlyList<RepositoryAnchor> repositories,
+	IReadOnlyDictionary<string, FileStamp>? stamps,
+	IReadOnlySet<string>? completeFolders = null,
+	int scanLimit = WorkspaceChanges.MaxFiles)
 {
 	internal string Workspace { get; } = workspace;
 
@@ -46,10 +59,27 @@ internal sealed class ChangeAnchor(string workspace, IReadOnlyList<RepositoryAnc
 
 	/// <summary>
 	/// Size and write time for each file in no repository, which is all
-	/// that can be known about a file with no history. Null when the
+	/// that can be collected cheaply across a large tree. Null when the
 	/// workspace is itself a repository.
 	/// </summary>
-	internal IReadOnlyDictionary<string, long>? Stamps { get; } = stamps;
+	internal IReadOnlyDictionary<string, FileStamp>? Stamps { get; } = stamps;
+
+	/// <summary>
+	/// Folders whose direct file list was captured in full. Null is used
+	/// by synthetic anchors in tests and means the supplied list is
+	/// complete.
+	/// </summary>
+	internal IReadOnlySet<string>? CompleteFolders { get; } = completeFolders;
+
+	/// <summary>The loose-file scan bound used for both sides.</summary>
+	internal int ScanLimit { get; } = scanLimit;
+
+	/// <summary>
+	/// Content captured before an approved built-in file write. These
+	/// paths can be reconciled by hash without hashing the whole tree.
+	/// </summary>
+	internal ConcurrentDictionary<string, FileContentState> WriteBaselines { get; } =
+		new(StringComparer.OrdinalIgnoreCase);
 
 	/// <summary>
 	/// The repository holding a listed path, or null when the file is in
@@ -83,8 +113,9 @@ internal sealed class ChangeAnchor(string workspace, IReadOnlyList<RepositoryAnc
 /// A workspace that is not a repository is often the folder above one
 /// or more checkouts, so the repositories inside it are found and each
 /// is anchored the same way: a file in any of them keeps its history.
-/// Only a file in no repository falls back to a size-and-time stamp,
-/// which is enough to say that it changed, the part worth knowing.
+/// Files in no repository use a bounded metadata snapshot to find
+/// candidates. A capped scan never treats an unseen file as created or
+/// deleted, and approved built-in writes are reconciled by content hash.
 /// </summary>
 internal static class WorkspaceChanges
 {
@@ -112,16 +143,24 @@ internal static class WorkspaceChanges
 	/// Records the state of the workspace before a turn runs. Returns
 	/// null when there is no workspace to watch.
 	/// </summary>
-	internal static ChangeAnchor? Begin(string? workspace)
+	internal static ChangeAnchor? Begin(string? workspace) => Begin(workspace, MaxFiles);
+
+	/// <summary>
+	/// Records the state with a specific loose-file bound. The overload
+	/// exists so cutoff behavior can be covered without creating tens of
+	/// thousands of fixture files.
+	/// </summary>
+	internal static ChangeAnchor? Begin(string? workspace, int scanLimit)
 	{
 		if (string.IsNullOrWhiteSpace(workspace) || !Directory.Exists(workspace)) return null;
+		if (scanLimit <= 0) throw new ArgumentOutOfRangeException(nameof(scanLimit));
 		workspace = Path.GetFullPath(workspace);
 
 		if (Git(workspace, "rev-parse --is-inside-work-tree") is "true" && Anchor(workspace, workspace) is { } own)
-			return new ChangeAnchor(workspace, [own], null);
+			return new ChangeAnchor(workspace, [own], null, scanLimit: scanLimit);
 
 		var found = new List<string>();
-		var stamps = Stamps(workspace, Roots([]), found);
+		var snapshot = Snapshot(workspace, Roots([]), found, scanLimit);
 		found.Sort(StringComparer.OrdinalIgnoreCase);
 		var repositories = found.AsParallel().AsOrdered().WithDegreeOfParallelism(GitRunsAtOnce)
 			.Select(root => Anchor(workspace, root)).OfType<RepositoryAnchor>().ToList();
@@ -129,8 +168,8 @@ internal static class WorkspaceChanges
 		// anchor to, such as one before its first commit, is watched by
 		// stamp like any other folder.
 		if (repositories.Count < found.Count)
-			stamps = Stamps(workspace, Roots(repositories), null);
-		return new ChangeAnchor(workspace, repositories, stamps);
+			snapshot = Snapshot(workspace, Roots(repositories), null, scanLimit);
+		return new ChangeAnchor(workspace, repositories, snapshot.Files, snapshot.CompleteFolders, scanLimit);
 	}
 
 	/// <summary>
@@ -203,20 +242,151 @@ internal static class WorkspaceChanges
 
 	private static List<WorkspaceChange> StampChanges(ChangeAnchor anchor)
 	{
-		var before = anchor.Stamps ?? new Dictionary<string, long>();
-		var after = Stamps(anchor.Workspace, Roots(anchor.Repositories), null);
+		var before = anchor.Stamps ?? new Dictionary<string, FileStamp>();
+		var after = Snapshot(anchor.Workspace, Roots(anchor.Repositories), null, anchor.ScanLimit);
 		var changes = new List<WorkspaceChange>();
-		foreach (var (path, stamp) in after)
+		foreach (var (path, stamp) in after.Files)
 		{
 			if (!before.TryGetValue(path, out var was))
-				changes.Add(new WorkspaceChange(path, "added"));
+			{
+				if (FolderWasComplete(anchor, path))
+					changes.Add(new WorkspaceChange(path, "added"));
+			}
 			else if (was != stamp)
 				changes.Add(new WorkspaceChange(path, "modified"));
 		}
 		foreach (var path in before.Keys)
-			if (!after.ContainsKey(path))
+			if (!after.Files.ContainsKey(path) && FilePresence(FullPath(anchor, path)) is false)
 				changes.Add(new WorkspaceChange(path, "deleted"));
+		ReconcileWrites(anchor, changes);
 		return changes;
+	}
+
+	/// <summary>
+	/// Captures the content immediately before an approved built-in file
+	/// write. Git already provides this baseline inside repositories; a
+	/// loose file needs its own hash.
+	/// </summary>
+	internal static void RecordWriteIntent(ChangeAnchor? anchor, string? path, bool requireSnapshotMatch = false)
+	{
+		if (anchor is null || string.IsNullOrWhiteSpace(path)) return;
+		if (ListedPath(anchor, path) is not { } listed || anchor.RepositoryFor(listed.Path) is not null)
+			return;
+		if (anchor.WriteBaselines.ContainsKey(listed.Path))
+			return;
+		if (!BaselineStillCurrent(anchor, listed.Path, listed.FullPath, allowUnknown: !requireSnapshotMatch))
+			return;
+		if (ContentState(listed.FullPath) is { } baseline)
+			anchor.WriteBaselines.TryAdd(listed.Path, baseline);
+	}
+
+	private static void ReconcileWrites(ChangeAnchor anchor, List<WorkspaceChange> changes)
+	{
+		foreach (var (path, before) in anchor.WriteBaselines)
+		{
+			if (ContentState(FullPath(anchor, path)) is not { } after)
+				continue;
+			changes.RemoveAll(change => string.Equals(change.Path, path, StringComparison.OrdinalIgnoreCase));
+			var kind = before.Exists switch
+			{
+				false when after.Exists => "added",
+				true when !after.Exists => "deleted",
+				true when after.Exists && !string.Equals(before.Hash, after.Hash, StringComparison.Ordinal) => "modified",
+				_ => null,
+			};
+			if (kind is not null)
+				changes.Add(new WorkspaceChange(path, kind));
+		}
+	}
+
+	private static bool BaselineStillCurrent(ChangeAnchor anchor, string path, string fullPath, bool allowUnknown)
+	{
+		if (!IsInsideWorkspace(path))
+			return allowUnknown;
+		if (anchor.Stamps is null)
+			return false;
+		if (anchor.Stamps.TryGetValue(path, out var baseline))
+			return Stamp(fullPath) is { } current && current == baseline;
+		return FolderWasComplete(anchor, path)
+			? FilePresence(fullPath) is false
+			: allowUnknown;
+	}
+
+	private static bool FolderWasComplete(ChangeAnchor anchor, string path) =>
+		anchor.CompleteFolders is null || anchor.CompleteFolders.Contains(ParentFolder(path));
+
+	private static string ParentFolder(string path)
+	{
+		var slash = path.LastIndexOf('/');
+		return slash < 0 ? string.Empty : path[..slash];
+	}
+
+	private static bool IsInsideWorkspace(string path) =>
+		!Path.IsPathFullyQualified(path)
+		&& path != ".."
+		&& !path.StartsWith("../", StringComparison.Ordinal);
+
+	private static (string Path, string FullPath)? ListedPath(ChangeAnchor anchor, string path)
+	{
+		try
+		{
+			var fullPath = Path.GetFullPath(Path.IsPathFullyQualified(path)
+				? path
+				: Path.Combine(anchor.Workspace, path));
+			var listed = Path.GetRelativePath(anchor.Workspace, fullPath).Replace('\\', '/');
+			return (listed, fullPath);
+		}
+		catch (Exception ex) when (ex is ArgumentException or NotSupportedException or PathTooLongException)
+		{
+			return null;
+		}
+	}
+
+	private static FileContentState? ContentState(string path)
+	{
+		if (FilePresence(path) is not { } exists)
+			return null;
+		if (!exists)
+			return new FileContentState(false, string.Empty);
+		try
+		{
+			using var stream = new FileStream(path, FileMode.Open, FileAccess.Read,
+				FileShare.ReadWrite | FileShare.Delete, 128 * 1024, FileOptions.SequentialScan);
+			return new FileContentState(true, Convert.ToHexString(SHA256.HashData(stream)));
+		}
+		catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+		{
+			return null;
+		}
+	}
+
+	private static bool? FilePresence(string path)
+	{
+		try
+		{
+			return !File.GetAttributes(path).HasFlag(FileAttributes.Directory);
+		}
+		catch (Exception ex) when (ex is FileNotFoundException or DirectoryNotFoundException)
+		{
+			return false;
+		}
+		catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+		{
+			return null;
+		}
+	}
+
+	private static FileStamp? Stamp(string path)
+	{
+		try
+		{
+			var file = new FileInfo(path);
+			return file.Exists ? new FileStamp(file.Length, file.LastWriteTimeUtc.Ticks) : null;
+		}
+		catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+		{
+			return null;
+		}
 	}
 
 	/// <summary>
@@ -296,29 +466,80 @@ internal static class WorkspaceChanges
 
 	/// <summary>
 	/// Size and write time per file, bounded so a very large tree costs
-	/// a fixed amount rather than an unbounded one. The repositories in
+	/// a fixed amount rather than an unbounded one. Direct file lists
+	/// are marked complete per folder, so reaching the bound cannot turn
+	/// an unchanged file into a false creation or deletion. The
+	/// repositories in
 	/// <paramref name="anchored"/> are left out, since their history
 	/// already answers for their files. When <paramref name="found"/> is
 	/// given, the walk is also a search: a folder at the top of a
 	/// repository is listed there and not walked into.
 	/// </summary>
-	private static Dictionary<string, long> Stamps(string workspace, IReadOnlySet<string> anchored, List<string>? found)
+	private static LooseSnapshot Snapshot(
+		string workspace,
+		IReadOnlySet<string> anchored,
+		List<string>? found,
+		int scanLimit)
 	{
-		var stamps = new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase);
-		var folders = new Stack<string>();
-		folders.Push(workspace);
-		while (folders.Count > 0 && stamps.Count < MaxFiles)
+		var files = new Dictionary<string, FileStamp>(StringComparer.OrdinalIgnoreCase);
+		var completeFolders = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+		var folders = new Queue<string>();
+		folders.Enqueue(workspace);
+		while (folders.Count > 0 && files.Count < scanLimit)
 		{
-			var folder = folders.Pop();
+			var folder = folders.Dequeue();
+			FileInfo[] directFiles;
 			try
 			{
-				foreach (var file in new DirectoryInfo(folder).EnumerateFiles())
+				directFiles = new DirectoryInfo(folder).EnumerateFiles()
+					.OrderBy(file => file.Name, StringComparer.OrdinalIgnoreCase)
+					.ThenBy(file => file.Name, StringComparer.Ordinal)
+					.ToArray();
+			}
+			catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+			{
+				continue;
+			}
+
+			var complete = true;
+			foreach (var file in directFiles)
+			{
+				if (files.Count >= scanLimit)
 				{
-					stamps[Path.GetRelativePath(workspace, file.FullName).Replace('\\', '/')] =
-						file.Length ^ file.LastWriteTimeUtc.Ticks;
-					if (stamps.Count >= MaxFiles) break;
+					complete = false;
+					break;
 				}
-				foreach (var child in new DirectoryInfo(folder).EnumerateDirectories())
+				try
+				{
+					files[Path.GetRelativePath(workspace, file.FullName).Replace('\\', '/')] =
+						new FileStamp(file.Length, file.LastWriteTimeUtc.Ticks);
+				}
+				catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+				{
+					complete = false;
+				}
+			}
+			if (complete)
+			{
+				var relative = Path.GetRelativePath(workspace, folder).Replace('\\', '/');
+				completeFolders.Add(relative == "." ? string.Empty : relative);
+			}
+
+			DirectoryInfo[] children;
+			try
+			{
+				children = new DirectoryInfo(folder).EnumerateDirectories()
+					.OrderBy(child => child.Name, StringComparer.OrdinalIgnoreCase)
+					.ThenBy(child => child.Name, StringComparer.Ordinal)
+					.ToArray();
+			}
+			catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+			{
+				continue;
+			}
+			foreach (var child in children)
+			{
+				try
 				{
 					if (SkippedFolders.Contains(child.Name) || child.Attributes.HasFlag(FileAttributes.ReparsePoint)
 						|| anchored.Contains(child.FullName))
@@ -327,17 +548,20 @@ internal static class WorkspaceChanges
 					// .git file rather than a folder, so either counts.
 					if (found is { Count: < MaxRepositories } && Path.Exists(Path.Combine(child.FullName, ".git")))
 						found.Add(child.FullName);
-					else
-						folders.Push(child.FullName);
+					else if (files.Count < scanLimit)
+						folders.Enqueue(child.FullName);
+				}
+				catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+				{
 				}
 			}
-			catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
-			{
-				// An unreadable folder simply reports no changes.
-			}
 		}
-		return stamps;
+		return new LooseSnapshot(files, completeFolders);
 	}
+
+	private sealed record LooseSnapshot(
+		Dictionary<string, FileStamp> Files,
+		HashSet<string> CompleteFolders);
 
 	private static string Bound(string? diff)
 	{

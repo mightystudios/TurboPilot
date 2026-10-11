@@ -338,6 +338,64 @@ internal static class CoreChecks
 			"A workspace without Git offers no diff rather than a wrong one");
 		Check.True(!WorkspaceChanges.Revert(loose, "b.txt"), "Nothing can be put back without an earlier copy.");
 
+		// Reads and metadata inspection never become changes. Built-in
+		// writes are reconciled by content, so writing identical bytes or
+		// restoring the baseline also disappears from the final list.
+		using var verified = new TestWorkspace();
+		var changed = verified.Write("workspace\\changed.txt", "before");
+		var same = verified.Write("workspace\\same.txt", "same");
+		var reverted = verified.Write("workspace\\reverted.txt", "original");
+		var metadata = verified.Write("workspace\\metadata.txt", "metadata");
+		var deleted = verified.Write("workspace\\deleted.txt", "delete me");
+		var changedBeforeIntent = verified.Write("workspace\\late-intent.txt", "before");
+		var observed = verified.Write("workspace\\observed.txt", "read only");
+		var readOnly = verified.Write("workspace\\read-only.txt", "read only");
+		File.SetAttributes(readOnly, File.GetAttributes(readOnly) | FileAttributes.ReadOnly);
+		var verifiedAnchor = WorkspaceChanges.Begin(verified.Workspace)!;
+		foreach (var path in new[] { changed, same, reverted, metadata, deleted, Path.Combine(verified.Workspace, "created.txt") })
+			WorkspaceChanges.RecordWriteIntent(verifiedAnchor, path);
+
+		_ = File.ReadAllText(observed);
+		_ = File.ReadLines(observed).Any(line => line.Contains("only", StringComparison.Ordinal));
+		_ = Directory.EnumerateFiles(verified.Workspace).ToArray();
+		_ = System.Security.Cryptography.SHA256.HashData(File.ReadAllBytes(readOnly));
+		_ = new FileInfo(observed).Attributes;
+		File.WriteAllText(changed, "after");
+		File.WriteAllText(same, "same");
+		File.SetLastWriteTimeUtc(same, DateTime.UtcNow.AddMinutes(1));
+		File.WriteAllText(reverted, "temporary");
+		File.WriteAllText(reverted, "original");
+		File.SetLastWriteTimeUtc(reverted, DateTime.UtcNow.AddMinutes(1));
+		File.SetLastWriteTimeUtc(metadata, DateTime.UtcNow.AddMinutes(1));
+		File.WriteAllText(Path.Combine(verified.Workspace, "created.txt"), "created");
+		File.Delete(deleted);
+		File.WriteAllText(changedBeforeIntent, "after");
+		WorkspaceChanges.RecordWriteIntent(verifiedAnchor, changedBeforeIntent);
+
+		Check.Equal("added created.txt, deleted deleted.txt, modified changed.txt, modified late-intent.txt",
+			string.Join(", ", WorkspaceChanges.Since(verifiedAnchor)
+				.Select(change => change.Kind + " " + change.Path).Order()),
+			"Only final content differences belong in a loose-workspace summary");
+
+		// A bounded scan can see a different set after one real deletion.
+		// The unchanged file that crosses the cutoff is not a creation.
+		using var bounded = new TestWorkspace();
+		var first = bounded.Write("workspace\\a\\one.txt", "one");
+		var removedAtBoundary = bounded.Write("workspace\\a\\two.txt", "two");
+		var crossedBoundary = bounded.Write("workspace\\b\\observed.txt", "unchanged");
+		File.SetAttributes(crossedBoundary, File.GetAttributes(crossedBoundary) | FileAttributes.ReadOnly);
+		var changedPastBoundary = bounded.Write("workspace\\b\\z-changed.txt", "before");
+		var boundedAnchor = WorkspaceChanges.Begin(bounded.Workspace, 2)!;
+		WorkspaceChanges.RecordWriteIntent(boundedAnchor, changedPastBoundary);
+		File.Delete(removedAtBoundary);
+		_ = File.ReadAllText(crossedBoundary);
+		File.WriteAllText(changedPastBoundary, "after");
+		Check.Equal("deleted a/two.txt, modified b/z-changed.txt",
+			string.Join(", ", WorkspaceChanges.Since(boundedAnchor)
+				.Select(change => change.Kind + " " + change.Path).Order()),
+			"Cutoff reconciliation must exclude an observed file and retain a verified write");
+		Check.True(File.Exists(first), "The bounded fixture keeps its unchanged file.");
+
 		// A workspace is often the folder above a checkout rather than
 		// the checkout itself. A file inside the checkout still has its
 		// history, and is diffed, compared and put back through it. A
@@ -429,7 +487,7 @@ internal static class CoreChecks
 		Check.Equal(0, WorkspaceChanges.Since(null).Count, "No anchor means nothing to report");
 		Check.True(WorkspaceChanges.Begin(Path.Combine(workspace.Root, "absent")) is null,
 			"A workspace that is not there cannot be watched.");
-		Console.WriteLine("PASS workspace changes anchored per turn and per repository in the workspace, diffed, compared, and reverted");
+		Console.WriteLine("PASS workspace changes use Git or verified loose-file state without cutoff or read false positives");
 
 		// Runs a diff tool command with a stand-in tool that prints the
 		// two files it was given. Settings passed in the environment
