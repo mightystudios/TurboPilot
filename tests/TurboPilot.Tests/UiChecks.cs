@@ -369,6 +369,7 @@ internal static class UiChecks
 			CheckCustomizationDiscoveryDialog(workspace);
 			CheckPromptReferences(window);
 			await CheckCommandsAsync(window, workspace);
+			CheckAttachmentDialogImagePreview(application, window, workspace);
 			CheckFileDrop(window, workspace);
 			CheckChangeActions(application, window);
 
@@ -970,6 +971,70 @@ internal static class UiChecks
 			&& previewSplitter.Visibility == Visibility.Collapsed
 			&& previewRow.ActualHeight == 0,
 			"Remove the image preview area and divider when no thumbnails remain.");
+	}
+
+	private static void CheckAttachmentDialogImagePreview(
+		Application application,
+		MainWindow window,
+		TestWorkspace workspace)
+	{
+		var attachments = Field<List<string>>(window, "_attachments");
+		var previousAttachments = attachments.ToArray();
+		var previews = Control<StackPanel>(window, "imagePreviewPanel");
+		var image = BitmapSource.Create(
+			2,
+			1,
+			96,
+			96,
+			PixelFormats.Bgra32,
+			null,
+			new byte[] { 255, 0, 255, 255, 0, 255, 0, 255 },
+			8);
+		var imageFile = ClipboardImageAttachment.SavePng(image, workspace.Workspace);
+
+		try
+		{
+			using (DialogAction<AttachmentsDialog>(application, dialog =>
+			{
+				Field<List<string>>(dialog, "_paths").Add(imageFile);
+				Invoke(dialog, "OnOk", dialog, new RoutedEventArgs());
+			}))
+			{
+				Click(window, "buttonAttachments");
+			}
+
+			Check.True(attachments.Contains(imageFile, StringComparer.OrdinalIgnoreCase),
+				"Keep an image selected through the attachments dialog.");
+			var preview = previews.Children.OfType<Image>()
+				.Single(item => string.Equals(item.ToolTip as string, imageFile, StringComparison.OrdinalIgnoreCase));
+			Check.True(preview.Source is not null
+				&& preview.Stretch == Stretch.Uniform
+				&& preview.Margin == new Thickness(4, 4, 4, 2)
+				&& preview.SnapsToDevicePixels,
+				"Use the same prompt thumbnail presentation for an image selected in the attachments dialog.");
+
+			using (DialogAction<AttachmentsDialog>(application, dialog =>
+			{
+				Field<List<string>>(dialog, "_paths")
+					.RemoveAll(path => string.Equals(path, imageFile, StringComparison.OrdinalIgnoreCase));
+				Invoke(dialog, "OnOk", dialog, new RoutedEventArgs());
+			}))
+			{
+				Click(window, "buttonAttachments");
+			}
+
+			Check.True(!attachments.Contains(imageFile, StringComparer.OrdinalIgnoreCase)
+				&& !previews.Children.OfType<Image>()
+					.Any(item => string.Equals(item.ToolTip as string, imageFile, StringComparison.OrdinalIgnoreCase)),
+				"Removing an attachment-dialog image must also remove its prompt thumbnail.");
+		}
+		finally
+		{
+			attachments.Clear();
+			attachments.AddRange(previousAttachments);
+			Invoke(window, "UpdateAttachmentButton");
+		}
+		Console.WriteLine("PASS attachments dialog image uses the shared prompt preview");
 	}
 
 	private static void CheckFileDrop(MainWindow window, TestWorkspace workspace)

@@ -336,30 +336,15 @@ public partial class MainWindow : TurbolandWindow
 		}
 
 		var added = 0;
-		var previewFailures = new List<string>();
 		foreach (var file in files)
 		{
 			if (_attachments.Contains(file, StringComparer.OrdinalIgnoreCase))
 				continue;
 			_attachments.Add(file);
 			added++;
-			try
-			{
-				AddDroppedImagePreview(file);
-			}
-			catch (Exception ex) when (ex is IOException
-				or UnauthorizedAccessException
-				or FileFormatException
-				or NotSupportedException
-				or System.Runtime.InteropServices.COMException)
-			{
-				previewFailures.Add($"{System.IO.Path.GetFileName(file)}: {ex.Message}");
-			}
 		}
 		if (added > 0)
 			UpdateAttachmentButton();
-		if (previewFailures.Count > 0)
-			ShowNotice("Cannot preview dropped image: " + string.Join("; ", previewFailures));
 		return added > 0;
 	}
 
@@ -369,7 +354,7 @@ public partial class MainWindow : TurbolandWindow
 	/// </summary>
 	private void UpdateAttachmentButton()
 	{
-		PruneImagePreviews();
+		SynchronizeImagePreviews();
 		buttonAttachments.Content = $"+{_attachments.Count}";
 		RefreshPromptCompletion();
 	}
@@ -381,7 +366,6 @@ public partial class MainWindow : TurbolandWindow
 		{
 			_attachments.Add(path);
 			_temporaryAttachments.Add(path);
-			AddImagePreview(path, image);
 			UpdateAttachmentButton();
 		}
 		catch
@@ -396,7 +380,37 @@ public partial class MainWindow : TurbolandWindow
 		}
 	}
 
-	private void AddDroppedImagePreview(string path)
+	/// <summary>
+	/// Makes the preview pane reflect every image in the pending attachment
+	/// list, regardless of whether it came from the picker, clipboard, or a
+	/// file drop.
+	/// </summary>
+	private void SynchronizeImagePreviews()
+	{
+		PruneImagePreviews();
+
+		var failures = new List<string>();
+		foreach (var path in _attachments)
+		{
+			try
+			{
+				AddImagePreview(path);
+			}
+			catch (Exception ex) when (ex is IOException
+				or UnauthorizedAccessException
+				or FileFormatException
+				or NotSupportedException
+				or System.Runtime.InteropServices.COMException)
+			{
+				failures.Add($"{System.IO.Path.GetFileName(path)}: {ex.Message}");
+			}
+		}
+
+		if (failures.Count > 0)
+			ShowNotice("Cannot preview image attachment: " + string.Join("; ", failures));
+	}
+
+	private void AddImagePreview(string path)
 	{
 		if (!PreviewImageExtensions.Contains(System.IO.Path.GetExtension(path))
 			|| _imagePreviews.ContainsKey(path))
