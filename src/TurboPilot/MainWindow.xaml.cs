@@ -46,6 +46,7 @@ public partial class MainWindow : TurbolandWindow
 	private readonly Dictionary<string, FrameworkElement> _pastedImagePreviews =
 		new(StringComparer.OrdinalIgnoreCase);
 	private PromptReferenceCompletion? _referenceCompletion;
+	private string? _firstAttachmentPickerDirectory;
 
 	// Prompts sent this run, cycled through by the arrows beside the input
 	// box. Kept across sessions: ending a session drops the live
@@ -259,12 +260,19 @@ public partial class MainWindow : TurbolandWindow
 	/// </summary>
 	private void ButtonAttachments_Click(object sender, RoutedEventArgs e)
 	{
-		var dialog = new AttachmentsDialog(_attachments);
+		var dialog = new AttachmentsDialog(_attachments, TakeAttachmentPickerInitialDirectory);
 		if (dialog.ShowDialog(this) != true) return;
 
 		_attachments.Clear();
 		_attachments.AddRange(dialog.Attachments);
 		UpdateAttachmentButton();
+	}
+
+	private string? TakeAttachmentPickerInitialDirectory()
+	{
+		var directory = _firstAttachmentPickerDirectory;
+		_firstAttachmentPickerDirectory = null;
+		return directory;
 	}
 
 	private void Input_PreviewDragOver(object sender, DragEventArgs e)
@@ -1131,6 +1139,7 @@ public partial class MainWindow : TurbolandWindow
 		_chat = null;
 		_sessionModel = null;
 		_sessionId = null;
+		_firstAttachmentPickerDirectory = null;
 		_ctxTotal = 0;
 		_ctxUsed = 0;
 		_aic = 0;
@@ -1214,6 +1223,7 @@ public partial class MainWindow : TurbolandWindow
 
 			cancellation.Token.ThrowIfCancellationRequested();
 			_sessionId = chat.SessionId ?? throw new InvalidOperationException("The runtime did not return a session ID.");
+			_firstAttachmentPickerDirectory = options.WorkspaceFolder;
 			if (_historySessions.Add(_sessionId) && resumeId is not null && chat.Record is { } saved)
 			{
 				foreach (var prompt in saved.Prompts)

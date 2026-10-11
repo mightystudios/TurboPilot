@@ -22,6 +22,7 @@ public partial class AttachmentsDialog : TurbolandFloatingDialog
 	// because this is NTFS: the same file picked twice under different
 	// casing must not attach twice.
 	private readonly List<string> _paths;
+	private readonly Func<string?>? _takeInitialDirectory;
 
 	/// <summary>
 	/// The edited attachment list. Only meaningful after the dialog
@@ -29,10 +30,11 @@ public partial class AttachmentsDialog : TurbolandFloatingDialog
 	/// </summary>
 	public IReadOnlyList<string> Attachments => _paths;
 
-	public AttachmentsDialog(IEnumerable<string> current)
+	public AttachmentsDialog(IEnumerable<string> current, Func<string?>? takeInitialDirectory = null)
 	{
 		InitializeComponent();
 
+		_takeInitialDirectory = takeInitialDirectory;
 		_paths = current
 			.Where(p => !string.IsNullOrWhiteSpace(p))
 			.Distinct(StringComparer.OrdinalIgnoreCase)
@@ -85,12 +87,7 @@ public partial class AttachmentsDialog : TurbolandFloatingDialog
 
 	private void OnAdd(object sender, RoutedEventArgs e)
 	{
-		var dialog = new OpenFileDialog
-		{
-			Title = "Attach File(s) to Prompt",
-			Multiselect = true,
-			CheckFileExists = true,
-		};
+		var dialog = CreateFilePicker(_takeInitialDirectory?.Invoke());
 		if (dialog.ShowDialog(this) != true) return;
 
 		int before = _paths.Count;
@@ -107,6 +104,19 @@ public partial class AttachmentsDialog : TurbolandFloatingDialog
 			listBox.SelectedIndex = _paths.Count - 1;
 
 		UpdateButtonStates();
+	}
+
+	internal static OpenFileDialog CreateFilePicker(string? initialDirectory)
+	{
+		var dialog = new OpenFileDialog
+		{
+			Title = "Attach File(s) to Prompt",
+			Multiselect = true,
+			CheckFileExists = true,
+		};
+		if (!string.IsNullOrWhiteSpace(initialDirectory))
+			dialog.InitialDirectory = initialDirectory;
+		return dialog;
 	}
 
 	private void OnRemove(object sender, RoutedEventArgs e)

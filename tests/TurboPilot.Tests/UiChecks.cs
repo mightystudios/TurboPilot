@@ -282,6 +282,7 @@ internal static class UiChecks
 			Check.True(Control<MenuItem>(window, "menuCompactContext").IsEnabled
 				&& Control<MenuItem>(window, "menuResetContext").IsEnabled,
 				"Offer the context actions of a running session.");
+			CheckAttachmentPickerDirectory(window, workspace.Workspace, "A newly started session");
 			CheckTools(application, window, workspace);
 			CheckSettingsCaptions(workspace);
 			CheckReasoningEffortDefaults(workspace);
@@ -423,6 +424,7 @@ internal static class UiChecks
 			await Check.UntilAsync(() => window.IsSessionActive && Status(window).StartsWith("Ready.."),
 				"The Past Sessions menu did not resume the selected session.", timeoutSeconds: 45);
 			Check.Equal(sessionId, Field<ChatService>(window, "_chat").SessionId, "Resume the selected ID in the main window");
+			CheckAttachmentPickerDirectory(window, workspace.Workspace, "A resumed session");
 			Check.True(window.OutputText.Contains("UI streaming reply"), "Recall earlier output in both tabs.");
 			var resumedInstructions = Field<ChatService>(window, "_chat").Options.Customizations.Instructions;
 			Check.True(resumedInstructions.ContainsKey(refreshedStandard)
@@ -541,6 +543,7 @@ internal static class UiChecks
 	{
 		workspace.Write("workspace\\README.md", "Fixture document.");
 		await InvokeTask(window, "StartChatAsync", options, null);
+		CheckAttachmentPickerDirectory(window, workspace.Workspace, "A newly started replacement session");
 		provider.Replies.Enqueue(new LocalProvider.Reply("Results\r\n\r\nUpdated `README.md`."));
 		SetInput(window, "Please summarize README.md.");
 		Click(window, "buttonSend");
@@ -553,6 +556,8 @@ internal static class UiChecks
 		var live = options with { Model = "test-model-two" };
 		await InvokeTask(window, "StartFromSettingsAsync", live with { Mode = "Plan" });
 		Check.True(ReferenceEquals(chat, Field<ChatService>(window, "_chat")) && chat.SessionId == sessionId, "Keep the session for a live change.");
+		Check.True(Invoke(window, "TakeAttachmentPickerInitialDirectory") is null,
+			"A live setting change must not reset first-use picker behavior.");
 		await Check.UntilAsync(() => window.OutputText.Contains("--- Changed to test-model-two | Plan ---")
 			&& Control<TextBlock>(window, "sessionInfo").Text.StartsWith("test-model-two"),
 			"Show the live change in the transcript and the session badge.");
@@ -566,6 +571,7 @@ internal static class UiChecks
 		var restarted = Field<ChatService>(window, "_chat");
 		Check.True(!ReferenceEquals(chat, restarted) && restarted.Record!.BootstrapPending
 			&& restarted.Record.Bootstrap!.Summary.Contains(SessionFeatureChecks.HandoffMarker), "Attach the hand-off after restart consent.");
+		CheckAttachmentPickerDirectory(window, workspace.Workspace, "A restarted session");
 		Check.True(!window.OutputText.Contains(SessionFeatureChecks.HandoffMarker), "Do not display hand-off context.");
 		provider.Replies.Enqueue(new LocalProvider.Reply("Restarted with context."));
 		SetInput(window, "Continue after restart.");
@@ -603,6 +609,18 @@ internal static class UiChecks
 		finally { held.Release.TrySetResult(); }
 		Check.True(!window.IsSessionActive, "End during hand-off preparation must cancel the pending restart.");
 		Console.WriteLine("PASS UI Rendered links, live session changes, hand-off restart consent, and cancellation");
+	}
+
+	private static void CheckAttachmentPickerDirectory(MainWindow window, string workspace, string scenario)
+	{
+		var first = Invoke(window, "TakeAttachmentPickerInitialDirectory") as string;
+		Check.Equal(workspace, first, scenario + " must start its first attachment picker in the workspace root.");
+		Check.Equal(workspace, AttachmentsDialog.CreateFilePicker(first).InitialDirectory,
+			"The first file picker must receive the workspace root.");
+
+		var next = Invoke(window, "TakeAttachmentPickerInitialDirectory") as string;
+		Check.True(next is null && string.IsNullOrEmpty(AttachmentsDialog.CreateFilePicker(next).InitialDirectory),
+			"Later file pickers in the same session must use the platform default location.");
 	}
 	/// <summary>
 	/// The Tools menu. Each item opens a separate program, so the check
