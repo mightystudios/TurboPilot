@@ -69,6 +69,9 @@ internal static class RuntimeChecks
 			var chunks = new ConcurrentQueue<string>();
 			chat.TranscriptReceived += chunks.Enqueue;
 			await chat.StartAsync(options).WaitAsync(TimeSpan.FromSeconds(45));
+			Check.Equal(1, provider.WarmupRequests, "Warm the local model before declaring the session ready");
+			await chat.KeepAliveAsync().WaitAsync(TimeSpan.FromSeconds(15));
+			Check.Equal(2, provider.WarmupRequests, "Refresh the local model while the session is idle");
 			sessionId = chat.SessionId!;
 			var runtime = (CopilotSession)typeof(ChatService).GetField("_session", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(chat)!;
 			var skills = await runtime.Rpc.Skills.ListAsync();
@@ -99,7 +102,7 @@ internal static class RuntimeChecks
 			Check.Equal(0, errors.Count, "The running session must not hide errors");
 			await Check.ThrowsAsync<InvalidOperationException>(() => chat.StartAsync(options));
 			Check.Equal(sessionId, chat.SessionId, "A repeated start must not dispose the active session");
-			Console.WriteLine("PASS local-provider streaming, customization enforcement, context usage, and disk persistence");
+			Console.WriteLine("PASS local-provider warming, idle keep-alive, streaming, customization enforcement, context usage, and disk persistence");
 		}
 
 		File.WriteAllText(workspace.ApplicationInstructionsPath, "EDITED_APPLICATION_INSTRUCTIONS_SENTINEL");

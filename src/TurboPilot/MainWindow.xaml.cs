@@ -78,6 +78,7 @@ public partial class MainWindow : TurbolandWindow
 	private CancellationTokenSource? _startCancellation;
 	private CancellationTokenSource? _restartCancellation;
 	private bool _sessionChanging;
+	private bool _summarizingSession;
 	private bool _sendingInput;
 	private bool _closing;
 	private bool _closeRequested;
@@ -89,8 +90,8 @@ public partial class MainWindow : TurbolandWindow
 	private string? _sessionModel;
 	private string? _sessionId;
 
-	// Status line state: a short base phrase plus usage suffixes. The base
-	// is one of "Starting..", "Ready..", "Working.." or "Waiting..".
+	// Status line state: a short base phrase plus elapsed time, task
+	// progress, and usage suffixes.
 	private string _statusBase = "Ready..";
 	private int _ctxUsed;
 	private int _ctxTotal;
@@ -1274,11 +1275,19 @@ public partial class MainWindow : TurbolandWindow
 		{
 			// Asked before the runtime is torn down, since the model that
 			// worked the session is the only thing that can say what it
-			// was about. It is bounded and best effort: a line in a list
-			// is not worth holding up a shutdown for.
-			statusTextBlock.Text = "Summarizing the session..";
-			await chat.ArchiveAsync();
-			await chat.DisposeAsync();
+			// was about. The service continues to report elapsed progress
+			// if a local model has to wake before it can answer.
+			_summarizingSession = true;
+			RefreshChatState();
+			try
+			{
+				await chat.ArchiveAsync();
+				await chat.DisposeAsync();
+			}
+			finally
+			{
+				_summarizingSession = false;
+			}
 		}
 		_chat = null;
 		_sessionModel = null;
@@ -1417,9 +1426,11 @@ public partial class MainWindow : TurbolandWindow
 	private void RefreshChatState()
 	{
 		var previous = _statusBase;
-		_statusBase = _sessionChanging ? "Starting.."
+		_statusBase = _summarizingSession ? "Summarizing.."
+			: _sessionChanging ? "Starting.."
 			: _chat?.HasPendingQuestion == true ? "Waiting.."
-			: _chat?.IsWorking == true ? "Working.." : "Ready..";
+			: _chat?.IsWorking == true ? "Working.."
+			: _chat?.IsWarming == true ? "Warming.." : "Ready..";
 		if (_statusBase != previous && IsSessionActive)
 		{
 			if (_statusBase == "Waiting..")
@@ -1518,17 +1529,21 @@ public partial class MainWindow : TurbolandWindow
 			return;
 		}
 
-		statusTextBlock.Text = FormatStatus(_statusBase, _ctxUsed, _ctxTotal, _aic, _showAic, _chat?.Progress);
+		statusTextBlock.Text = FormatStatus(_statusBase, _ctxUsed, _ctxTotal, _aic, _showAic,
+			_chat?.Progress, _chat?.OperationElapsed);
 	}
 
 	/// <summary>
-	/// The status line: the state phrase, then where the agent is in its
-	/// plan, then context use and credits. Progress comes before the
-	/// numbers because it is the part the user is reading for.
+	/// The status line: the state phrase, elapsed time for a long
+	/// operation, where the agent is in its plan, then context use and
+	/// credits. Progress comes before the numbers because it is the part
+	/// the user is reading for.
 	/// </summary>
 	internal static string FormatStatus(string status, int used, int total, double credits, bool showCredits,
-		TaskProgress? progress = null)
+		TaskProgress? progress = null, TimeSpan? elapsed = null)
 	{
+		if (elapsed is { } duration)
+			status += " " + ShortText.Elapsed(duration);
 		if (progress?.StatusFragment is { Length: > 0 } fragment)
 			status += " " + fragment;
 		if (total > 0)

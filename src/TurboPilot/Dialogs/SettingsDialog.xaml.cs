@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Globalization;
 using System.IO;
 using System.Windows;
@@ -6,6 +7,7 @@ using System.Windows.Interop;
 using System.Windows.Media;
 using TurbolandTheme.Wpf.Controls;
 using TurboPilot.Ai;
+using TurboPilot.Rendering;
 using TurboPilot.Tools;
 
 namespace TurboPilot.Dialogs;
@@ -250,6 +252,8 @@ public partial class SettingsDialog : TurbolandFloatingDialog
 
 		buttonQuery.IsEnabled = false;
 		SetStatus("Contacting service...", isError: false);
+		var queryStarted = Stopwatch.GetTimestamp();
+		var progressTask = ReportQueryProgressAsync(queryStarted, cts.Token);
 
 		try
 		{
@@ -287,8 +291,27 @@ public partial class SettingsDialog : TurbolandFloatingDialog
 		}
 		finally
 		{
+			cts.Cancel();
+			await progressTask;
 			buttonQuery.IsEnabled = true;
 			UpdateBeginEnabled();
+		}
+	}
+
+	private async Task ReportQueryProgressAsync(long started, CancellationToken cancellationToken)
+	{
+		try
+		{
+			using var timer = new PeriodicTimer(SessionLiveness.ProgressInterval);
+			while (await timer.WaitForNextTickAsync(cancellationToken))
+			{
+				var elapsed = ShortText.Elapsed(Stopwatch.GetElapsedTime(started));
+				SetStatus($"Contacting service... {elapsed}", isError: false);
+			}
+		}
+		catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+		{
+			// Query completion and user cancellation both end progress updates.
 		}
 	}
 

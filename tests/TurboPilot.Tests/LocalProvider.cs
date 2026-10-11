@@ -21,6 +21,7 @@ internal sealed class LocalProvider : IAsyncDisposable
 	public ConcurrentQueue<string> Errors { get; } = new();
 	public ConcurrentQueue<(string Method, string? Authorization)> McpRequests { get; } = new();
 	public int DisabledServerRequests;
+	public int WarmupRequests;
 
 	public LocalProvider()
 	{
@@ -68,6 +69,21 @@ internal sealed class LocalProvider : IAsyncDisposable
 			{
 				context.Response.ContentType = "application/json";
 				await WriteAsync(context.Response, """{"data":[{"id":"test-model","max_context_window":32768},{"id":"test-model-two","max_context_window":65536}]}""");
+				return;
+			}
+			if (context.Request.Headers["X-TurboPilot-Keep-Alive"] == "1")
+			{
+				using var warmupReader = new StreamReader(context.Request.InputStream);
+				await warmupReader.ReadToEndAsync();
+				Interlocked.Increment(ref WarmupRequests);
+				context.Response.ContentType = "application/json";
+				await WriteAsync(context.Response, JsonSerializer.Serialize(new
+				{
+					id = "warmup", @object = "chat.completion",
+					created = DateTimeOffset.UtcNow.ToUnixTimeSeconds(), model = "test-model",
+					choices = new[] { new { index = 0, message = new { role = "assistant", content = "" }, finish_reason = "stop" } },
+					usage = new { prompt_tokens = 1, completion_tokens = 1, total_tokens = 2 },
+				}));
 				return;
 			}
 			using var reader = new StreamReader(context.Request.InputStream);
@@ -198,6 +214,7 @@ internal sealed class LocalProvider : IAsyncDisposable
 				},
 			},
 			"ping" => new { },
+			"server/discover" => new { servers = Array.Empty<object>() },
 			_ => throw new InvalidOperationException("Unexpected fixture server method: " + method),
 		};
 		context.Response.ContentType = "application/json";

@@ -68,7 +68,10 @@ public static class ModelService
 {
 	private static readonly HttpClient Http = new()
 	{
-		Timeout = TimeSpan.FromSeconds(20),
+		// Local servers may still be loading a model. The dialog owns
+		// cancellation and reports elapsed progress instead of turning an
+		// arbitrary HTTP deadline into a false failure.
+		Timeout = Timeout.InfiniteTimeSpan,
 	};
 
 	/// <summary>

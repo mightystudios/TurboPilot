@@ -1125,6 +1125,9 @@ internal static class CoreChecks
 		chat.TranscriptReceived += text => displayed.Append(text);
 		chat.ErrorReceived += errors.Add;
 		chat.HandleSessionEvent(SessionEvent.FromJson("""{"type":"assistant.turn_start","data":{"turnId":"turn-1"}}"""));
+		chat.HandleSessionEvent(SessionEvent.FromJson("""{"type":"session.error","data":{"message":"Provider call still running","errorType":"provider","errorCode":"ETIMEDOUT"}}"""));
+		Check.True(chat.IsWorking, "A timeout event must not end work that the runtime is still performing.");
+		Check.True(!displayed.ToString().Contains("still running"), "Do not report a timeout before the operation actually ends.");
 		chat.HandleSessionEvent(SessionEvent.FromJson("""{"type":"assistant.message_delta","data":{"messageId":"m1","deltaContent":"streamed"}}"""));
 		chat.HandleSessionEvent(SessionEvent.FromJson("""{"type":"assistant.message","data":{"messageId":"m1","content":"streamed"}}"""));
 		chat.HandleSessionEvent(SessionEvent.FromJson("""{"type":"assistant.message","data":{"messageId":"m2","content":"final only"}}"""));
@@ -1139,6 +1142,12 @@ internal static class CoreChecks
 		Check.Equal(131072, chat.ContextWindowTokens, "Use the runtime context limit");
 		chat.HandleSessionEvent(SessionEvent.FromJson("""{"type":"session.idle","data":{}}"""));
 		Check.True(!chat.IsWorking, "Idle must end the working state.");
+		Check.True(!displayed.ToString().Contains("still running"), "Later progress must discard a transient timeout.");
+		chat.HandleSessionEvent(SessionEvent.FromJson("""{"type":"assistant.turn_start","data":{"turnId":"turn-2"}}"""));
+		chat.HandleSessionEvent(SessionEvent.FromJson("""{"type":"session.error","data":{"message":"Terminal request timeout","errorType":"timeout","errorCode":"ETIMEDOUT","statusCode":408}}"""));
+		Check.True(chat.IsWorking, "A deferred timeout must preserve the working state until idle.");
+		chat.HandleSessionEvent(SessionEvent.FromJson("""{"type":"session.idle","data":{}}"""));
+		Check.True(displayed.ToString().Contains("Terminal request timeout"), "Report a deferred timeout once the operation ends without progress.");
 		chat.HandleSessionEvent(SessionEvent.FromJson("""{"type":"session.mcp_server_status_changed","data":{"serverName":"fixture","status":"failed","error":"Connection refused"}}"""));
 		chat.HandleSessionEvent(SessionEvent.FromJson("""{"type":"session.mcp_servers_loaded","data":{"servers":[{"name":"fixture","status":"failed","error":"Connection refused"}]}}"""));
 		Check.Equal(1, chat.Transcript.Split("Connection refused").Length - 1, "Surface server failures without duplicate notices");
@@ -1198,6 +1207,23 @@ internal static class CoreChecks
 		Check.Equal("Working.. 20/128K AiC=13", MainWindow.FormatStatus("Working..", 20480, 131072, 13, true), "Compact cloud status");
 		Check.Equal("Ready.. 20/128K", MainWindow.FormatStatus("Ready..", 20480, 131072, 13, false), "Hide credits for other providers");
 		Check.Equal("Waiting..", MainWindow.FormatStatus("Waiting..", 0, 0, 0, false), "Do not invent an unknown context limit");
+		Check.Equal("Working.. 30s 20/128K",
+			MainWindow.FormatStatus("Working..", 20480, 131072, 0, false, elapsed: TimeSpan.FromSeconds(30)),
+			"Report elapsed time for a long-running operation");
+		Check.Equal("Warming.. 2m", MainWindow.FormatStatus("Warming..", 0, 0, 0, false,
+			elapsed: TimeSpan.FromMinutes(2)), "Keep long local warmups visible");
+		var local = new ChatSessionOptions
+		{
+			UseByok = true,
+			ByokEndpoint = "http://localhost:1234/v1",
+			Model = "fixture",
+		};
+		Check.Equal("http://localhost:1234/v1/chat/completions",
+			SessionLiveness.WarmupUri(local)?.AbsoluteUri, "Build the loopback warmup route");
+		Check.True(SessionLiveness.WarmupUri(local with { ByokEndpoint = "https://models.example.com/v1" }) is null,
+			"Never send keep-alive inference to a remote provider");
+		Check.True(SessionLiveness.WarmupUri(local with { UseByok = false }) is null,
+			"Never send keep-alive inference for a cloud session");
 		CheckTaskProgress();
 	}
 

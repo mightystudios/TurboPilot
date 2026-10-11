@@ -81,4 +81,20 @@ internal static class ShortText
 		if (text.Length <= max) return text;
 		return max <= Ellipsis.Length ? text[^max..] : Ellipsis + text[^(max - Ellipsis.Length)..];
 	}
+
+	/// <summary>
+	/// A compact elapsed time for a narrow status line. Seconds are useful
+	/// until the first minute; longer operations use whole minutes and
+	/// hours so progress never crowds out the state or usage figures.
+	/// </summary>
+	internal static string Elapsed(TimeSpan elapsed)
+	{
+		if (elapsed < TimeSpan.Zero)
+			elapsed = TimeSpan.Zero;
+		if (elapsed.TotalHours >= 1)
+			return $"{(int)elapsed.TotalHours}h {elapsed.Minutes}m";
+		if (elapsed.TotalMinutes >= 1)
+			return $"{(int)elapsed.TotalMinutes}m";
+		return $"{Math.Max(1, (int)elapsed.TotalSeconds)}s";
+	}
 }

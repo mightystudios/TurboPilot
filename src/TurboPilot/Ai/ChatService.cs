@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.IO;
 using System.Text;
 using GitHub.Copilot;
@@ -14,6 +15,7 @@ public sealed partial class ChatService : IAsyncDisposable
 	private readonly object _sync = new();
 	private readonly SemaphoreSlim _lifecycle = new(1, 1);
 	private readonly SemaphoreSlim _sending = new(1, 1);
+	private readonly SemaphoreSlim _keepAliveGate = new(1, 1);
 	private readonly CancellationTokenSource _lifetime = new();
 	private readonly Queue<PendingQuestion> _questions = new();
 	private readonly HashSet<string> _streamedMessages = [];
@@ -25,12 +27,23 @@ public sealed partial class ChatService : IAsyncDisposable
 	private readonly string? _applicationInstructionsPath;
 	private CopilotClient? _client;
 	private CopilotSession? _session;
+	private Task? _maintenanceTask;
+	private Task? _keepAliveTask;
 	private ChatSessionOptions _options = new();
 	private SessionRecord? _record;
 	private bool _acceptQuestions = true;
 	private bool _transcriptWriteFailed;
 	private volatile bool _isWorking;
+	private bool _connecting;
+	private bool _isWarming;
+	private bool? _providerWarmupSupported;
+	private bool _keepAliveFailureReported;
+	private bool _warmupFailureReported;
 	private int _disposeStarted;
+	private long _connectionStarted;
+	private long _turnStarted;
+	private long _warmupStarted;
+	private long _lastActivity;
 	private long _sessionAicNano;
 	private TaskCompletionSource? _turnIdle;
 	private StringBuilder? _capture;
@@ -48,6 +61,7 @@ public sealed partial class ChatService : IAsyncDisposable
 	private IReadOnlyList<PlanStep> _plan = [];
 	private string? _planMessageId;
 	private Task _planTail = Task.CompletedTask;
+	private string? _deferredTimeoutMessage;
 
 	// Tool calls awaiting their outcome, so the completion can be
 	// written into the row the start opened rather than printed as a
@@ -100,6 +114,7 @@ public sealed partial class ChatService : IAsyncDisposable
 	public string? SessionId { get; private set; }
 	public string Model => _options.Model;
 	public bool IsWorking => _isWorking;
+	public bool IsWarming { get { lock (_sync) return _isWarming; } }
 	public ChatSessionOptions Options => _options;
 	// The settings the session is headed for: a change waiting for the current turn to end, or the active settings.
 	public ChatSessionOptions RequestedOptions
@@ -118,6 +133,30 @@ public sealed partial class ChatService : IAsyncDisposable
 		_applicationInstructionsPath ?? ApplicationInstructions.DefaultPath;
 	public double AicUsed => Interlocked.Read(ref _sessionAicNano) / 1_000_000_000.0;
 	public SessionRecord? Record => _record;
+
+	/// <summary>
+	/// Elapsed time for the operation represented by the status line.
+	/// Connection takes precedence over an active turn, then an idle
+	/// local-provider warmup.
+	/// </summary>
+	public TimeSpan? OperationElapsed
+	{
+		get
+		{
+			lock (_sync)
+			{
+				var started = _connecting
+					? _connectionStarted
+					: _isWorking
+						? _turnStarted
+						: _isWarming ? _warmupStarted : 0;
+				if (started == 0)
+					return null;
+				var elapsed = Stopwatch.GetElapsedTime(started);
+				return elapsed < SessionLiveness.ProgressInterval ? null : elapsed;
+			}
+		}
+	}
 
 	public string Transcript
 	{
@@ -158,6 +197,14 @@ public sealed partial class ChatService : IAsyncDisposable
 				throw new InvalidOperationException("Create a new service to start or resume another session.");
 			_startAttempted = true;
 			starting = true;
+			lock (_sync)
+			{
+				_connecting = true;
+				_connectionStarted = Stopwatch.GetTimestamp();
+				_lastActivity = _connectionStarted;
+				_maintenanceTask ??= MaintainSessionAsync();
+			}
+			StateChanged?.Invoke();
 			if (!string.IsNullOrWhiteSpace(options.WorkspaceFolder) && !Directory.Exists(options.WorkspaceFolder))
 				throw new DirectoryNotFoundException($"Workspace '{options.WorkspaceFolder}' no longer exists.");
 
@@ -196,7 +243,9 @@ public sealed partial class ChatService : IAsyncDisposable
 			config.OnEvent = HandleSessionEvent;
 
 			_client = _createClient(_options);
-			await _client.StartAsync(token);
+			var providerWarmup = SessionLiveness.WarmProviderAsync(_options, token);
+			await Task.WhenAll(_client.StartAsync(token), providerWarmup);
+			SetProviderWarmupSupport(await providerWarmup);
 			if (ContextWindowTokens <= 0)
 				ContextWindowTokens = await LookupContextWindowAsync(token);
 			if (config.Provider is { } provider && ContextWindowTokens > 0)
@@ -230,6 +279,7 @@ public sealed partial class ChatService : IAsyncDisposable
 			}
 			AddNotice(NoticeFormatter.Banner($"{(resumeId is null ? "Session" : "Resumed")} {SessionId} | {_options.Model} | {_options.Mode}"));
 			_isWorking = false;
+			TouchActivity();
 			StateChanged?.Invoke();
 			UsageChanged?.Invoke();
 		}
@@ -241,6 +291,12 @@ public sealed partial class ChatService : IAsyncDisposable
 		}
 		finally
 		{
+			lock (_sync)
+			{
+				_connecting = false;
+				_connectionStarted = 0;
+			}
+			StateChanged?.Invoke();
 			_lifecycle.Release();
 		}
 	}
@@ -305,6 +361,9 @@ public sealed partial class ChatService : IAsyncDisposable
 			{
 				_acceptQuestions = true;
 				_isWorking = true;
+				_turnStarted = Stopwatch.GetTimestamp();
+				_lastActivity = _turnStarted;
+				_deferredTimeoutMessage = null;
 				_turnIdle = new(TaskCreationOptions.RunContinuationsAsynchronously);
 			}
 			StateChanged?.Invoke();
@@ -326,8 +385,13 @@ public sealed partial class ChatService : IAsyncDisposable
 			}
 			catch
 			{
-				_isWorking = wasWorking;
-				_turnIdle?.TrySetResult();
+				lock (_sync)
+				{
+					_isWorking = wasWorking;
+					if (!wasWorking)
+						_turnStarted = 0;
+					_turnIdle?.TrySetResult();
+				}
 				StateChanged?.Invoke();
 				throw;
 			}
@@ -416,8 +480,164 @@ public sealed partial class ChatService : IAsyncDisposable
 			idle = _turnIdle.Task;
 		}
 		await session.AbortAsync(cancellationToken);
-		await idle.WaitAsync(TimeSpan.FromSeconds(15), cancellationToken);
+		// Abort is asynchronous. The runtime owns the transition to idle,
+		// so wait for that real completion signal instead of reporting an
+		// arbitrary local deadline while shutdown is still underway.
+		await idle.WaitAsync(cancellationToken);
 	}
+
+	private async Task MaintainSessionAsync()
+	{
+		try
+		{
+			using var timer = new PeriodicTimer(SessionLiveness.ProgressInterval);
+			while (await timer.WaitForNextTickAsync(_lifetime.Token).ConfigureAwait(false))
+			{
+				var reportProgress = false;
+				var keepAliveDue = false;
+				lock (_sync)
+				{
+					var waitingForUser = _questions.Count > 0;
+					reportProgress = _connecting || _isWorking || _isWarming;
+					keepAliveDue = _session is not null
+						&& !_connecting
+						&& (!_isWorking || waitingForUser)
+						&& !_isWarming
+						&& _lastActivity != 0
+						&& Stopwatch.GetElapsedTime(_lastActivity) >= SessionLiveness.KeepAliveInterval;
+					if (keepAliveDue)
+						_lastActivity = Stopwatch.GetTimestamp();
+				}
+
+				if (reportProgress)
+					StateChanged?.Invoke();
+				if (keepAliveDue)
+				{
+					var keepAlive = KeepAliveAsync();
+					lock (_sync) _keepAliveTask = keepAlive;
+					_ = keepAlive;
+				}
+			}
+		}
+		catch (OperationCanceledException) when (_lifetime.IsCancellationRequested)
+		{
+			// Normal session shutdown.
+		}
+	}
+
+	internal async Task KeepAliveAsync()
+	{
+		var gateHeld = false;
+		var warming = false;
+		try
+		{
+			gateHeld = await _keepAliveGate.WaitAsync(0, _lifetime.Token).ConfigureAwait(false);
+			if (!gateHeld)
+				return;
+
+			CopilotClient? client;
+			lock (_sync)
+			{
+				if (_connecting || (_isWorking && _questions.Count == 0) || _session is null)
+					return;
+				client = _client;
+				warming = _providerWarmupSupported != false
+					&& SessionLiveness.WarmupUri(_options) is not null;
+				if (warming)
+				{
+					_isWarming = true;
+					_warmupStarted = Stopwatch.GetTimestamp();
+				}
+			}
+			if (client is null)
+				return;
+			if (warming)
+				StateChanged?.Invoke();
+
+			var ping = client.PingAsync("TurboPilot idle keep-alive", _lifetime.Token);
+			var provider = warming
+				? SessionLiveness.WarmProviderAsync(_options, _lifetime.Token)
+				: Task.FromResult(ProviderWarmupResult.Skipped);
+			await Task.WhenAll(ping, provider).ConfigureAwait(false);
+			SetProviderWarmupSupport(await provider.ConfigureAwait(false));
+			lock (_sync) _keepAliveFailureReported = false;
+		}
+		catch (OperationCanceledException) when (_lifetime.IsCancellationRequested)
+		{
+			// Normal session shutdown.
+		}
+		catch (Exception ex)
+		{
+			var report = false;
+			lock (_sync)
+			{
+				if (!_keepAliveFailureReported)
+					report = _keepAliveFailureReported = true;
+			}
+			if (report)
+				ErrorReceived?.Invoke("Idle keep-alive failed; the session remains available and will retry: " + ex.Message);
+		}
+		finally
+		{
+			lock (_sync)
+			{
+				if (warming)
+				{
+					_isWarming = false;
+					_warmupStarted = 0;
+				}
+				_lastActivity = Stopwatch.GetTimestamp();
+			}
+			if (warming)
+				StateChanged?.Invoke();
+			if (gateHeld)
+				_keepAliveGate.Release();
+		}
+	}
+
+	private void SetProviderWarmupSupport(ProviderWarmupResult result)
+	{
+		var reportFailure = false;
+		lock (_sync)
+		{
+			if (result == ProviderWarmupResult.Warmed)
+			{
+				_providerWarmupSupported = true;
+				_warmupFailureReported = false;
+			}
+			else if (result is ProviderWarmupResult.Skipped or ProviderWarmupResult.Unsupported)
+				_providerWarmupSupported = false;
+			else if (!_warmupFailureReported)
+				reportFailure = _warmupFailureReported = true;
+		}
+		if (reportFailure)
+			ErrorReceived?.Invoke("The local model could not be warmed; the session remains available and the next prompt can retry.");
+	}
+
+	private void TouchActivity()
+	{
+		lock (_sync) _lastActivity = Stopwatch.GetTimestamp();
+	}
+
+	private static bool IsTimeoutError(SessionErrorData error) =>
+		error.StatusCode is 408 or 504
+		|| ContainsTimeout(error.ErrorCode)
+		|| ContainsTimeout(error.ErrorType)
+		|| ContainsTimeout(error.Message);
+
+	private static bool ContainsTimeout(string? text) =>
+		text?.Contains("timeout", StringComparison.OrdinalIgnoreCase) == true
+		|| text?.Contains("timed out", StringComparison.OrdinalIgnoreCase) == true
+		|| text?.Contains("timedout", StringComparison.OrdinalIgnoreCase) == true
+		|| text?.Contains("deadline", StringComparison.OrdinalIgnoreCase) == true;
+
+	private static bool IsSubstantiveActivity(SessionEvent evt) =>
+		evt is AssistantTurnStartEvent
+			or AssistantMessageDeltaEvent
+			or AssistantMessageEvent
+			or ToolExecutionStartEvent
+			or ToolExecutionCompleteEvent
+			or SessionTodosChangedEvent;
 
 	public ValueTask DisposeAsync()
 	{
@@ -430,6 +650,12 @@ public sealed partial class ChatService : IAsyncDisposable
 		Interlocked.Exchange(ref _disposeStarted, 1);
 		_lifetime.Cancel();
 		ReleaseQuestions();
+		if (_maintenanceTask is { } maintenance)
+			await maintenance.ConfigureAwait(false);
+		Task? keepAlive;
+		lock (_sync) keepAlive = _keepAliveTask;
+		if (keepAlive is not null)
+			await keepAlive.ConfigureAwait(false);
 		await _lifecycle.WaitAsync();
 		await _sending.WaitAsync();
 		try
@@ -450,6 +676,13 @@ public sealed partial class ChatService : IAsyncDisposable
 				}
 			}
 			_isWorking = false;
+			lock (_sync)
+			{
+				_turnStarted = 0;
+				_warmupStarted = 0;
+				_isWarming = false;
+				_deferredTimeoutMessage = null;
+			}
 			_turnIdle?.TrySetResult();
 		}
 		finally
@@ -666,10 +899,15 @@ public sealed partial class ChatService : IAsyncDisposable
 		{
 			lock (_sync)
 			{
+				_lastActivity = Stopwatch.GetTimestamp();
+				if (IsSubstantiveActivity(evt))
+					_deferredTimeoutMessage = null;
 				switch (evt)
 				{
 					case AssistantTurnStartEvent:
 						_isWorking = true;
+						if (_turnStarted == 0)
+							_turnStarted = Stopwatch.GetTimestamp();
 						// A new turn gets its own checklist. Revising the
 						// one from the previous turn would rewrite history
 						// the user has already scrolled past.
@@ -720,9 +958,18 @@ public sealed partial class ChatService : IAsyncDisposable
 						foreach (var server in servers.Data.Servers)
 							ReportServerStatus(server.Name, server.Status.Value, server.Error);
 						break;
+					case SessionErrorEvent error when IsTimeoutError(error.Data) && _isWorking:
+						// A provider may emit a timeout while it continues
+						// loading or generating. Keep the turn live; later
+						// assistant/tool activity proves this was transient.
+						_deferredTimeoutMessage ??= error.Data.Message;
+						StateChanged?.Invoke();
+						break;
 					case SessionErrorEvent error:
+						_deferredTimeoutMessage = null;
 						AddNotice(NoticeFormatter.Status("error", error.Data.Message));
 						_isWorking = false;
+						_turnStarted = 0;
 						_turnIdle?.TrySetResult();
 						ReleaseQuestions();
 						break;
@@ -756,7 +1003,11 @@ public sealed partial class ChatService : IAsyncDisposable
 						UsageChanged?.Invoke();
 						break;
 					case SessionIdleEvent:
+						if (!string.IsNullOrWhiteSpace(_deferredTimeoutMessage))
+							AddNotice(NoticeFormatter.Status("error", _deferredTimeoutMessage));
+						_deferredTimeoutMessage = null;
 						_isWorking = false;
+						_turnStarted = 0;
 						_turnIdle?.TrySetResult();
 						_streamedMessages.Clear();
 						_completedMessages.Clear();
@@ -1396,15 +1647,6 @@ public sealed partial class ChatService : IAsyncDisposable
 	}
 
 	/// <summary>
-	/// How long the archive summary may hold up the end of a session. A
-	/// line in a list is not worth making somebody wait to close the
-	/// program, so the call is abandoned rather than waited out. One
-	/// sentence written from context already loaded is a short turn, but
-	/// a model under load still has to be given room to answer at all.
-	/// </summary>
-	private static readonly TimeSpan ArchiveTimeout = TimeSpan.FromSeconds(60);
-
-	/// <summary>
 	/// What the model is asked for at the end of a session. The shape of
 	/// the answer is spelled out because the answer is not read by a
 	/// person: it is put straight into a list row, which shows whatever
@@ -1460,7 +1702,7 @@ public sealed partial class ChatService : IAsyncDisposable
 	/// Everything about it is best effort. A session that sent nothing
 	/// has nothing to say, a session closed in the middle of a turn is
 	/// left alone rather than interrupted for a list row, and a failure,
-	/// a timeout or a runtime already on its way down leaves the previous
+	/// or a runtime already on its way down leaves the previous
 	/// line in place rather than holding up the shutdown it is part of.
 	/// </summary>
 	public async Task<string?> ArchiveAsync(CancellationToken cancellationToken = default)
@@ -1490,7 +1732,6 @@ public sealed partial class ChatService : IAsyncDisposable
 			if (_isWorking || HasPendingQuestion || Volatile.Read(ref _preparingHandoff) > 0) return null;
 
 			using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, _lifetime.Token);
-			linked.CancelAfter(ArchiveTimeout);
 
 			Task idle;
 			StringBuilder capture;
@@ -1498,9 +1739,13 @@ public sealed partial class ChatService : IAsyncDisposable
 			{
 				_capture = capture = new StringBuilder();
 				_isWorking = true;
+				_turnStarted = Stopwatch.GetTimestamp();
+				_lastActivity = _turnStarted;
+				_deferredTimeoutMessage = null;
 				_turnIdle = new(TaskCreationOptions.RunContinuationsAsynchronously);
 				idle = _turnIdle.Task;
 			}
+			StateChanged?.Invoke();
 			try
 			{
 				await session.SendAsync(new MessageOptions
@@ -1510,6 +1755,17 @@ public sealed partial class ChatService : IAsyncDisposable
 					AgentMode = _agentMode,
 				}, linked.Token).ConfigureAwait(false);
 				await idle.WaitAsync(linked.Token).ConfigureAwait(false);
+			}
+			catch
+			{
+				lock (_sync)
+				{
+					_isWorking = false;
+					_turnStarted = 0;
+					_turnIdle?.TrySetResult();
+				}
+				StateChanged?.Invoke();
+				throw;
 			}
 			finally
 			{
@@ -1526,6 +1782,10 @@ public sealed partial class ChatService : IAsyncDisposable
 				_store.Save(record);
 			}
 			return sentence;
+		}
+		catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested || _lifetime.IsCancellationRequested)
+		{
+			return null;
 		}
 		catch (Exception ex) when (ex is not OutOfMemoryException)
 		{
