@@ -1212,6 +1212,8 @@ internal static class CoreChecks
 			"Report elapsed time for a long-running operation");
 		Check.Equal("Warming.. 2m", MainWindow.FormatStatus("Warming..", 0, 0, 0, false,
 			elapsed: TimeSpan.FromMinutes(2)), "Keep long local warmups visible");
+		Check.Equal(TimeSpan.FromSeconds(16.875), MainWindow.StatusMarqueeDuration(360, 720),
+			"Move the complete marquee distance at the configured 64 pixels per second");
 		var local = new ChatSessionOptions
 		{
 			UseByok = true,

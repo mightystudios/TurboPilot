@@ -20,6 +20,8 @@
  *                                            following the bottom
  *   scrollToEnd()                          - show the last line and follow
  *                                            new output
+ *   setCodeCopyResult(id, succeeded)       - report a clipboard result
+ *   exportTranscriptHtml()                 - body HTML without live controls
  *
  * Application notices (questions, permission requests, tool calls,
  * errors and session banners) arrive in that same stream as small
@@ -76,6 +78,7 @@
 	var transcriptDiagramTimer = 0;
 	var TRANSCRIPT_RENDER_MS = 40;   // coalesce rapid appends while streaming
 	var TRANSCRIPT_DIAGRAM_MS = 300; // convert diagrams once the stream pauses
+	var codeCopySequence = 0;
 
 	// Drawn diagrams, each in its zoom frame, by the key placeDiagrams gives
 	// its fenced block. See placeDiagrams.
@@ -170,6 +173,44 @@
 			}));
 		} catch (_) { /* ignore */ }
 	}
+
+	function postCodeCopyMessage(id, text) {
+		if (!window.chrome || !window.chrome.webview
+			|| typeof window.chrome.webview.postMessage !== "function") {
+			return false;
+		}
+		try {
+			window.chrome.webview.postMessage(JSON.stringify({
+				type: "copyCode",
+				id: id,
+				text: text
+			}));
+			return true;
+		} catch (_) {
+			return false;
+		}
+	}
+
+	document.addEventListener("click", function (e) {
+		var button = e.target && e.target.closest && e.target.closest(".kp-code-copy");
+		if (!button) return;
+		e.preventDefault();
+		e.stopPropagation();
+
+		var wrapper = button.closest(".kp-code-wrap");
+		var code = wrapper && wrapper.querySelector("pre > code");
+		if (!code) {
+			window.setCodeCopyResult(button.getAttribute("data-kp-copy-id"), false);
+			return;
+		}
+
+		if (button._kpResetTimer) clearTimeout(button._kpResetTimer);
+		button.disabled = true;
+		button.textContent = "Copying...";
+		button.classList.remove("kp-code-copy-copied", "kp-code-copy-failed");
+		if (!postCodeCopyMessage(button.getAttribute("data-kp-copy-id"), code.textContent))
+			window.setCodeCopyResult(button.getAttribute("data-kp-copy-id"), false);
+	});
 
 	document.addEventListener("click", function (e) {
 		var a = e.target && e.target.closest && e.target.closest("a[href]");
@@ -287,19 +328,69 @@
 	}
 
 	/**
-	 * Runs highlight.js over every fenced block under root. Mermaid fences
-	 * are skipped: they are diagrams in waiting, not code, and coloring
-	 * their source would fight the renderer.
+	 * Runs highlight.js over every fenced block under root and adds its
+	 * copy control. Mermaid fences are skipped: they are diagrams in
+	 * waiting, not code, and coloring their source would fight the
+	 * renderer.
 	 */
 	function highlightCodeIn(root) {
-		if (!root || !window.hljs) return;
+		if (!root) return;
 		var codes = root.querySelectorAll("pre code");
 		for (var i = 0; i < codes.length; i++) {
 			var el = codes[i];
 			if (el.classList.contains("language-mermaid")) continue;
-			try { hljs.highlightElement(el); } catch (_) { /* leave it plain */ }
+			if (window.hljs) {
+				try { hljs.highlightElement(el); } catch (_) { /* leave it plain */ }
+			}
+			addCodeCopyControl(el);
 		}
 	}
+
+	function addCodeCopyControl(code) {
+		var pre = code && code.parentElement;
+		if (!pre || !pre.parentElement) return;
+		if (pre.parentElement.classList.contains("kp-code-wrap")) return;
+
+		var wrapper = document.createElement("div");
+		wrapper.className = "kp-code-wrap";
+		var toolbar = document.createElement("div");
+		toolbar.className = "kp-code-toolbar";
+		var button = document.createElement("button");
+		button.type = "button";
+		button.className = "kp-code-copy";
+		button.setAttribute("aria-label", "Copy code to clipboard");
+		button.setAttribute("title", "Copy code to clipboard");
+		button.setAttribute("data-kp-copy-id", "code-copy-" + (++codeCopySequence));
+		button.textContent = "Copy";
+		toolbar.appendChild(button);
+
+		pre.parentElement.insertBefore(wrapper, pre);
+		wrapper.appendChild(toolbar);
+		wrapper.appendChild(pre);
+	}
+
+	window.setCodeCopyResult = function (id, succeeded) {
+		var buttons = document.querySelectorAll(".kp-code-copy[data-kp-copy-id]");
+		var button = null;
+		for (var i = 0; i < buttons.length; i++) {
+			if (buttons[i].getAttribute("data-kp-copy-id") === id) {
+				button = buttons[i];
+				break;
+			}
+		}
+		if (!button) return;
+
+		button.disabled = false;
+		button.textContent = succeeded ? "Copied" : "Copy failed";
+		button.classList.toggle("kp-code-copy-copied", !!succeeded);
+		button.classList.toggle("kp-code-copy-failed", !succeeded);
+		button._kpResetTimer = setTimeout(function () {
+			if (!button.isConnected) return;
+			button.textContent = "Copy";
+			button.classList.remove("kp-code-copy-copied", "kp-code-copy-failed");
+			button._kpResetTimer = 0;
+		}, 1800);
+	};
 
 	function processMermaidBlocks(containerEl) {
 		var codeBlocks = containerEl.querySelectorAll("pre > code.language-mermaid");
@@ -759,6 +850,16 @@
 	window.scrollToEnd = function () {
 		stickToBottom = true;
 		scrollToBottom();
+	};
+
+	window.exportTranscriptHtml = function () {
+		var clone = outputEl.cloneNode(true);
+		var wrappers = clone.querySelectorAll(".kp-code-wrap");
+		for (var i = 0; i < wrappers.length; i++) {
+			var pre = wrappers[i].querySelector("pre");
+			if (pre) wrappers[i].replaceWith(pre);
+		}
+		return clone.innerHTML;
 	};
 
 	/**

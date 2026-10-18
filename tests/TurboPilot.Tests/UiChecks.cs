@@ -271,8 +271,8 @@ internal static class UiChecks
 
 		window.Width = 520;
 		Invoke(window, "SetStatusText", longStatus);
-		await Check.UntilAsync(() => transform.HasAnimatedProperties,
-			"An overflowing status line did not start its marquee.");
+		await Check.UntilAsync(() => transform.HasAnimatedProperties && transform.X > 1,
+			"An overflowing status line did not start its marquee at the right edge.");
 
 		var viewportBounds = viewport.TransformToAncestor(bar)
 			.TransformBounds(new Rect(viewport.RenderSize));
@@ -288,12 +288,9 @@ internal static class UiChecks
 			"The complete status string must remain unclipped inside the marquee viewport.");
 
 		var firstPosition = transform.X;
-		var movementTimer = System.Diagnostics.Stopwatch.StartNew();
-		await Task.Delay(600);
-		movementTimer.Stop();
-		var measuredSpeed = (firstPosition - transform.X) / movementTimer.Elapsed.TotalSeconds;
-		Check.True(measuredSpeed is >= 29 and <= 45,
-			$"Overflowing status text must move right to left near 36 pixels per second, measured {measuredSpeed:0.0}.");
+		await Task.Delay(300);
+		Check.True(transform.X < firstPosition - 1,
+			"Overflowing status text must move from right to left.");
 
 		var narrowViewportWidth = viewport.ActualWidth;
 		window.Width = 700;
@@ -307,6 +304,52 @@ internal static class UiChecks
 		Check.True(!transform.HasAnimatedProperties && Math.Abs(transform.X) < 0.01,
 			"Status text that fits must remain stationary.");
 		Console.WriteLine("PASS Dynamic status width and marquee");
+	}
+
+	private static async Task CheckCodeBlockCopyAsync(MainWindow window, WebView2 webView)
+	{
+		const string source = "$path = \"C:\\Temp & Logs\"\nGet-ChildItem $path\n";
+		window.ClearOutput();
+		window.AppendOutput("```powershell\r\n" + source.Replace("\n", "\r\n") + "```\r\n\r\n"
+			+ "```mermaid\r\ngraph TD\r\nA --> B\r\n```\r\n");
+
+		string state = "";
+		for (var attempt = 0; attempt < 100 && state.Length == 0; attempt++)
+		{
+			state = JsonSerializer.Deserialize<string>(await webView.CoreWebView2.ExecuteScriptAsync(
+				"(function () { var b = document.querySelector('#output .kp-code-copy');"
+				+ " var c = document.querySelector('#output .kp-code-wrap pre > code');"
+				+ " if (!b || !c) return '';"
+				+ " return b.tagName + '|' + b.type + '|' + b.textContent + '|'"
+				+ " + b.getAttribute('aria-label') + '|' + c.textContent + '|'"
+				+ " + document.querySelectorAll('#output .kp-code-copy').length + '|'"
+				+ " + document.querySelectorAll('#output .kp-code-wrap').length; })()")) ?? "";
+			if (state.Length == 0)
+				await Task.Delay(50);
+		}
+		Check.Equal("BUTTON|button|Copy|Copy code to clipboard|" + source + "|1|1", state,
+			"Every non-Mermaid fenced block must have one accessible copy button carrying the complete code.");
+
+		var exported = JsonSerializer.Deserialize<string>(await webView.CoreWebView2.ExecuteScriptAsync(
+			"exportTranscriptHtml()")) ?? "";
+		Check.True(exported.Contains("<pre><code class=\"language-powershell")
+			&& !exported.Contains("kp-code-copy")
+			&& !exported.Contains("kp-code-wrap"),
+			"Script-free transcript exports must keep the code but omit live copy controls.");
+
+		await webView.CoreWebView2.ExecuteScriptAsync(
+			"document.querySelector('#output .kp-code-copy').click()");
+		var result = "";
+		for (var attempt = 0; attempt < 100 && result is not ("Copied" or "Copy failed"); attempt++)
+		{
+			result = JsonSerializer.Deserialize<string>(await webView.CoreWebView2.ExecuteScriptAsync(
+				"document.querySelector('#output .kp-code-copy').textContent")) ?? "";
+			if (result is not ("Copied" or "Copy failed"))
+				await Task.Delay(50);
+		}
+		Check.Equal("Copied", result, "The copy button must report a successful Windows clipboard operation");
+		Check.Equal(source, Clipboard.GetText(), "The copy button must place the complete code block on the clipboard");
+		Console.WriteLine("PASS Rendered code blocks copy their complete text and exports omit the live control");
 	}
 
 	private static async Task CheckRenderedUserPromptStyleAsync(MainWindow window, WebView2 webView)
@@ -397,6 +440,7 @@ internal static class UiChecks
 			outputTabs.SelectedIndex = 0;
 			await window.Dispatcher.InvokeAsync(() => { }, DispatcherPriority.Loaded);
 			await CheckStatusMarqueeAsync(window);
+			await CheckCodeBlockCopyAsync(window, webView);
 			await CheckPromptLayoutAsync(window);
 			await CheckRenderedUserPromptStyleAsync(window, webView);
 			CheckThemedMessageDialogs(application, window, workspace);

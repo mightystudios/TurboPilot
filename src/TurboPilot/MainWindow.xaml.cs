@@ -598,9 +598,9 @@ public partial class MainWindow : TurbolandWindow
 	// ── WebView2 event handlers ──────────────────────────────────────────────
 
 	/// <summary>
-	/// Handles JSON messages posted by the web renderer (currently the
-	/// file-path link click/right-click bridge). Unknown message shapes
-	/// are ignored silently so the renderer can introduce new message
+	/// Handles JSON messages posted by the web renderer for links,
+	/// change actions, and code-block copy controls. Unknown message
+	/// shapes are ignored so the renderer can introduce new message
 	/// types without crashing older builds.
 	/// </summary>
 	private void WebView_WebMessageReceived(
@@ -625,10 +625,22 @@ public partial class MainWindow : TurbolandWindow
 			using var doc = JsonDocument.Parse(json);
 			var root = doc.RootElement;
 
-			if (root.TryGetProperty("type", out var typeEl)
-				&& root.TryGetProperty("path", out var pathEl))
+			if (!root.TryGetProperty("type", out var typeEl))
+				return;
+			var type = typeEl.GetString();
+			if (type == "copyCode"
+				&& root.TryGetProperty("id", out var idEl)
+				&& root.TryGetProperty("text", out var textEl))
 			{
-				var type = typeEl.GetString();
+				var id = idEl.GetString();
+				var text = textEl.GetString();
+				if (!string.IsNullOrEmpty(id) && text is not null)
+					CopyRenderedCode(id, text);
+				return;
+			}
+
+			if (root.TryGetProperty("path", out var pathEl))
+			{
 				var path = pathEl.GetString();
 				if (string.IsNullOrEmpty(type) || string.IsNullOrEmpty(path)) return;
 
@@ -639,6 +651,22 @@ public partial class MainWindow : TurbolandWindow
 		{
 			// Malformed JSON — ignore silently
 		}
+	}
+
+	private void CopyRenderedCode(string id, string text)
+	{
+		var succeeded = true;
+		try
+		{
+			Clipboard.SetText(text);
+		}
+		catch (Exception ex) when (ex is System.Runtime.InteropServices.ExternalException
+			or ThreadStateException)
+		{
+			succeeded = false;
+		}
+
+		PushToRenderer($"setCodeCopyResult({JsString(id)}, {(succeeded ? "true" : "false")})");
 	}
 
 	/// <summary>
@@ -1569,17 +1597,19 @@ public partial class MainWindow : TurbolandWindow
 		if (viewportWidth <= 0 || textWidth <= viewportWidth + StatusMarqueeOverflowTolerance)
 			return;
 
-		var travelDistance = viewportWidth + textWidth;
 		var animation = new DoubleAnimation
 		{
 			From = viewportWidth,
 			To = -textWidth,
-			Duration = TimeSpan.FromSeconds(travelDistance / StatusMarqueePixelsPerSecond),
+			Duration = StatusMarqueeDuration(viewportWidth, textWidth),
 			RepeatBehavior = RepeatBehavior.Forever,
 		};
 		statusTextTransform.BeginAnimation(TranslateTransform.XProperty, animation,
 			HandoffBehavior.SnapshotAndReplace);
 	}
+
+	internal static TimeSpan StatusMarqueeDuration(double viewportWidth, double textWidth) =>
+		TimeSpan.FromSeconds((viewportWidth + textWidth) / StatusMarqueePixelsPerSecond);
 
 	/// <summary>
 	/// The status line: the state phrase, elapsed time for a long
@@ -2304,7 +2334,8 @@ public partial class MainWindow : TurbolandWindow
 		}
 
 		var json = await webViewOutput.CoreWebView2.ExecuteScriptAsync(
-			"document.getElementById('output') ? document.getElementById('output').innerHTML : ''");
+			"typeof exportTranscriptHtml === 'function' ? exportTranscriptHtml()"
+			+ " : (document.getElementById('output') ? document.getElementById('output').innerHTML : '')");
 		var body = System.Text.Json.JsonSerializer.Deserialize<string>(json) ?? string.Empty;
 
 		var web = System.IO.Path.Combine(AppContext.BaseDirectory, "web");

@@ -197,12 +197,36 @@ input[type="radio"] {
 /* Fenced code blocks. Native scroll (no pan/zoom) so the user can
  * select, copy and paste freely. Pan/zoom is reserved for graphics
  * (Mermaid SVGs); see .kp-zoom-wrap below. */
+.kp-code-wrap {
+	margin: 8px 0;
+}
+.kp-code-toolbar {
+	display: flex;
+	justify-content: flex-end;
+	margin-bottom: 2px;
+}
+.kp-code-copy {
+	appearance: none;
+	border: 1px solid var(--bv-panel-border-strong);
+	padding: 2px 8px;
+	min-width: 8ch;
+	font-family: var(--bv-font);
+	font-size: 12px;
+	line-height: 1.2;
+	cursor: pointer;
+}
+.kp-code-copy:disabled {
+	cursor: default;
+}
 #output pre {
 	border: 1px solid var(--bv-panel-border);
 	padding: 10px 12px;
 	margin: 8px 0;
 	overflow: auto;
 	max-height: 480px;
+}
+.kp-code-wrap > pre {
+	margin: 0;
 }
 #output pre code {
 	padding: 0;
