@@ -79,14 +79,14 @@ public partial class PastSessionsDialog : TurbolandFloatingDialog
 		var selected = picked.Count == 1 ? picked[0] : null;
 		var deletable = Deletable();
 
-		buttonView.IsEnabled = selected is not null;
+		buttonView.IsEnabled = selected is not null && !IsCurrent(selected);
 		buttonResume.IsEnabled = selected is not null && !IsCurrent(selected);
 		buttonDelete.IsEnabled = _store is not null && deletable.Count > 0;
 
 		textCount.Text = picked.Count switch
 		{
 			0 => $"{listSessions.Items.Count} of {_sessions.Count} shown",
-			1 when IsCurrent(picked[0]) => "The running session cannot be resumed or deleted",
+			1 when IsCurrent(picked[0]) => "The running session is already open and cannot be resumed or deleted",
 			_ when picked.Count != deletable.Count => $"{picked.Count} selected, running session excluded",
 			1 => "",
 			_ => $"{picked.Count} selected",

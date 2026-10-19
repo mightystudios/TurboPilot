@@ -1207,8 +1207,18 @@ public partial class MainWindow : TurbolandWindow
 				}
 				return;
 			}
+			SessionDisposition? disposition = null;
+			if (change == SessionChange.Restart)
+			{
+				disposition = SessionDispositionDialog.Choose(this,
+					"The current session must end before the new session starts.");
+				if (disposition is null)
+					return;
+			}
 			SummaryBootstrap? bootstrap = null;
-			if (change == SessionChange.Restart && current!.HasConversation
+			if (change == SessionChange.Restart
+				&& disposition == SessionDisposition.SummarizeAndStore
+				&& current!.HasConversation
 				&& YesNoDialog.Ask(this, "Carry a summary of this session into the new one?", "Restart Context"))
 			{
 				try
@@ -1224,7 +1234,8 @@ public partial class MainWindow : TurbolandWindow
 				}
 			}
 			cancellation.Token.ThrowIfCancellationRequested();
-			await StartChatCoreAsync(options, null, bootstrap);
+			if (!await StartChatCoreAsync(options, null, bootstrap, disposition))
+				return;
 			// Only a session on a project the user has not opened yet is
 			// worth orienting. A session carrying a hand-off summary
 			// already knows the project, and restarting the same workspace
@@ -1276,13 +1287,17 @@ public partial class MainWindow : TurbolandWindow
 	}
 
 	/// <summary>
-	/// Ends the active session: disposes the SDK session, gates the
-	/// session-dependent controls back off and clears the workspace
-	/// scope. Session history and settings persist; only the live
-	/// session state goes away. There is no menu entry for this: a
-	/// session ends when another replaces it or the window closes.
+	/// Ends the active session after asking whether to retain it in Past
+	/// Sessions or abandon its saved history. There is no menu entry for
+	/// this: a session ends when another replaces it or the window closes.
 	/// </summary>
-	public async Task EndSessionAsync()
+	/// <returns>True when the session ended; false when the user canceled.</returns>
+	public Task<bool> EndSessionAsync() => EndSessionAsync(null);
+
+	internal Task<bool> EndSessionAsync(SessionDisposition disposition) =>
+		EndSessionAsync((SessionDisposition?)disposition);
+
+	private async Task<bool> EndSessionAsync(SessionDisposition? disposition)
 	{
 		_restartCancellation?.Cancel();
 		_startCancellation?.Cancel();
@@ -1291,45 +1306,67 @@ public partial class MainWindow : TurbolandWindow
 		SetSessionActive(IsSessionActive);
 		try
 		{
-			await EndChatCoreAsync();
+			return await EndChatCoreAsync(disposition);
 		}
 		finally
 		{
 			_sessionChanging = false;
-			SetSessionActive(false);
+			SetSessionActive(_chat is not null);
 			_sessionChange.Release();
 		}
 	}
 
-	private async Task EndChatCoreAsync()
+	private async Task<bool> EndChatCoreAsync(SessionDisposition? disposition = null)
 	{
-		if (_chat is { } chat)
+		if (_chat is not { } chat)
+			return true;
+
+		disposition ??= SessionDispositionDialog.Choose(this, "The current session is ending.");
+		if (disposition is null)
+			return false;
+
+		var sessionId = chat.SessionId ?? _sessionId;
+		try
 		{
-			// Asked before the runtime is torn down, since the model that
-			// worked the session is the only thing that can say what it
-			// was about. The service continues to report elapsed progress
-			// if a local model has to wake before it can answer.
-			_summarizingSession = true;
-			RefreshChatState();
-			try
+			if (disposition == SessionDisposition.SummarizeAndStore)
 			{
+				// Asked before the runtime is torn down, since the model
+				// that worked the session is the only thing that can say
+				// what it was about.
+				_summarizingSession = true;
+				RefreshChatState();
 				await chat.ArchiveAsync();
-				await chat.DisposeAsync();
-			}
-			finally
-			{
 				_summarizingSession = false;
 			}
+			await chat.DisposeAsync();
 		}
-		_chat = null;
-		_sessionModel = null;
-		_sessionId = null;
-		_firstAttachmentPickerDirectory = null;
-		_ctxTotal = 0;
-		_ctxUsed = 0;
-		_aic = 0;
-		_showAic = false;
-		SetSessionActive(false);
+		finally
+		{
+			_summarizingSession = false;
+			if (disposition == SessionDisposition.Abandon && sessionId is not null)
+			{
+				try
+				{
+					_sessionStore.Delete(sessionId);
+				}
+				catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException)
+				{
+					MessageDialog.Ok(this,
+						"The session ended, but its saved history could not be deleted.\r\n\r\n" + ex.Message,
+						"Abandon Session");
+				}
+			}
+			_chat = null;
+			_sessionModel = null;
+			_sessionId = null;
+			_firstAttachmentPickerDirectory = null;
+			_ctxTotal = 0;
+			_ctxUsed = 0;
+			_aic = 0;
+			_showAic = false;
+			SetSessionActive(false);
+		}
+		return true;
 	}
 
 	// -- Chat round-trip ---------------------------------------------------------
@@ -1339,10 +1376,11 @@ public partial class MainWindow : TurbolandWindow
 	/// wires its events into the transcript and the status line. A failed
 	/// start is reported in the transcript and drops back to no session.
 	/// </summary>
-	private Task StartChatAsync(ChatSessionOptions options, string? resumeId = null) =>
+	private Task<bool> StartChatAsync(ChatSessionOptions options, string? resumeId = null) =>
 		StartChatCoreAsync(options, resumeId, null);
 
-	private async Task StartChatCoreAsync(ChatSessionOptions options, string? resumeId, SummaryBootstrap? bootstrap)
+	private async Task<bool> StartChatCoreAsync(ChatSessionOptions options, string? resumeId,
+		SummaryBootstrap? bootstrap, SessionDisposition? disposition = null)
 	{
 		await _sessionChange.WaitAsync();
 		using var cancellation = new CancellationTokenSource();
@@ -1362,7 +1400,8 @@ public partial class MainWindow : TurbolandWindow
 						options.Customizations, currentCustomizations, options.WorkspaceFolder)
 					: currentCustomizations,
 			};
-			await EndChatCoreAsync();
+			if (!await EndChatCoreAsync(disposition))
+				return false;
 			cancellation.Token.ThrowIfCancellationRequested();
 
 			var chat = _createChat();
@@ -1418,15 +1457,22 @@ public partial class MainWindow : TurbolandWindow
 			_ctxUsed = chat.ContextUsedTokens;
 			_aic = chat.AicUsed;
 			_sessionModel = chat.Model;
+			return true;
 		}
 		catch (OperationCanceledException) when (cancellation.IsCancellationRequested)
 		{
-			await EndChatCoreAsync();
+			await EndChatCoreAsync(resumeId is null
+				? SessionDisposition.Abandon
+				: SessionDisposition.SummarizeAndStore);
+			return false;
 		}
 		catch (Exception ex)
 		{
 			AppendOutput($"\r\n[error] Session start failed: {ex.Message}\r\n\r\n");
-			await EndChatCoreAsync();
+			await EndChatCoreAsync(resumeId is null
+				? SessionDisposition.Abandon
+				: SessionDisposition.SummarizeAndStore);
+			return false;
 		}
 		finally
 		{
@@ -1489,18 +1535,28 @@ public partial class MainWindow : TurbolandWindow
 			var dialog = new PastSessionsDialog(sessions, _sessionStore, _sessionId);
 			if (dialog.ShowDialog(this) != true || dialog.SelectedSession is not { } selected)
 				return;
+			SessionDisposition? disposition = null;
 			if (IsSessionActive && !YesNoDialog.Ask(this,
 				"Open this saved session? The current session will end.", "Past Sessions"))
 				return;
+			if (IsSessionActive)
+			{
+				disposition = SessionDispositionDialog.Choose(this,
+					"The current session must end before saved history can be opened.");
+				if (disposition is null)
+					return;
+			}
 
 			if (!dialog.ResumeRequested)
 			{
-				await EndSessionAsync();
+				if (disposition is { } selectedDisposition
+					&& !await EndSessionAsync(selectedDisposition))
+					return;
 				var transcript = _sessionStore.ReadTranscript(selected.SessionId);
 				var rendered = _sessionStore.ReadRenderedTranscript(selected.SessionId);
 				ClearOutput();
 				AppendRawOutput(transcript);
-				AppendRenderedOutput(rendered);
+				ReplaceRenderedOutput(rendered);
 				OpenTranscriptAtTop();
 				return;
 			}
@@ -1510,7 +1566,8 @@ public partial class MainWindow : TurbolandWindow
 			// first permission check of the resumed session answers the way
 			// the original session would have.
 			var permissionsRestored = Permissions.PermissionService.Restore(options.WorkspaceFolder, selected.Permissions);
-			await StartChatAsync(options, selected.SessionId);
+			if (!await StartChatCoreAsync(options, selected.SessionId, null, disposition))
+				return;
 			if (permissionsRestored && _chat is not null)
 			{
 				var chat = _chat;
@@ -2165,33 +2222,37 @@ public partial class MainWindow : TurbolandWindow
 	}
 
 	/// <summary>
-	/// Session menu: throws the conversation away and reconnects on the
-	/// same settings, so the model starts from nothing. This is the
-	/// deliberate opposite of the restart hand-off: no summary travels,
-	/// which is the point. The transcript is kept and a banner marks
-	/// where the context was dropped.
+	/// Session menu: ends the current conversation and reconnects on the
+	/// same settings, so the model starts from nothing. A stored session
+	/// keeps the previous transcript on screen; an abandoned session
+	/// clears it along with the saved history.
 	/// </summary>
 	private async void OnResetContext(object sender, RoutedEventArgs e)
 	{
 		var chat = _chat;
 		if (chat is null || !IsSessionActive || _sendingInput || _closing) return;
-		if (!YesNoDialog.Ask(this,
-			"Reset this session's context? The model forgets the conversation so far.\r\n\r\n"
-			+ "The transcript on screen is kept, and nothing is carried into the new session.",
-			"Reset Context"))
+		var disposition = SessionDispositionDialog.Choose(this,
+			"Reset Context ends the current session and starts a new conversation with the same settings.\r\n\r\n"
+			+ "Storing keeps the previous transcript on screen. Abandoning clears it.");
+		if (disposition is null)
 			return;
 
 		var options = chat.RequestedOptions;
-		var transcript = OutputText;
-		var rendered = RenderedText;
-		await StartChatCoreAsync(options, null, null);
+		var transcript = disposition == SessionDisposition.SummarizeAndStore ? OutputText : "";
+		var rendered = disposition == SessionDisposition.SummarizeAndStore ? RenderedText : "";
+		if (!await StartChatCoreAsync(options, null, null, disposition))
+			return;
 		if (_chat is null)
 			return;
 		// StartChatCoreAsync clears both views for the new session. The
-		// conversation is gone from the model, not from the record of it.
-		ClearOutput();
-		AppendRawOutput(transcript);
-		AppendRenderedOutput(rendered);
+		// stored conversation remains visible, while abandoning leaves it
+		// cleared along with its saved files.
+		if (disposition == SessionDisposition.SummarizeAndStore)
+		{
+			ClearOutput();
+			AppendRawOutput(transcript);
+			ReplaceRenderedOutput(rendered);
+		}
 		var (text, banner) = NoticeFormatter.Status("reset", "Context cleared. The model starts from nothing.");
 		_chat.AddNotice(text, banner);
 	}
@@ -2371,7 +2432,12 @@ public partial class MainWindow : TurbolandWindow
 			if (!Dialogs.YesNoDialog.Ask(this, "Exit the Program?"))
 				return;
 			_closing = true;
-			await EndSessionAsync();
+			if (!await EndSessionAsync())
+			{
+				_closing = false;
+				RefreshChatState();
+				return;
+			}
 			_closeApproved = true;
 			Close();
 		}

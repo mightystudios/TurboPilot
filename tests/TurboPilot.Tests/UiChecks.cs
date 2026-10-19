@@ -76,6 +76,7 @@ internal static class UiChecks
 				var browserExited = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
 				var browserObserved = false;
 				LocalProvider.Reply? slowReply = null;
+				string? endingSessionId = null;
 				var sessionChange = Field<SemaphoreSlim>(window, "_sessionChange");
 				var sessionChangeHeld = false;
 				try
@@ -111,6 +112,7 @@ internal static class UiChecks
 							WorkspaceFolder = workspace.Workspace, Model = "test-model", UseByok = true,
 							ByokEndpoint = provider.Endpoint, ContextWindowTokens = 32768,
 						}, null);
+						endingSessionId = Field<ChatService>(window, "_chat").SessionId;
 						slowReply = new LocalProvider.Reply("Response interrupted by application exit.", Hold: true);
 						provider.Replies.Enqueue(slowReply);
 						await Field<ChatService>(window, "_chat").SendAsync("Keep this turn active.");
@@ -124,11 +126,17 @@ internal static class UiChecks
 					var closeReturned = false;
 					var confirmationDeferred = false;
 					var errorNotices = 0;
+					var dispositions = 0;
 					using var confirm = DialogAction<YesNoDialog>(application, dialog =>
 					{
 						confirmations++;
 						confirmationDeferred = closeReturned;
 						Invoke(dialog, "OnYes", dialog, new RoutedEventArgs());
+					});
+					using var disposeSession = DialogAction<SessionDispositionDialog>(application, dialog =>
+					{
+						dispositions++;
+						Invoke(dialog, "OnAbandon", dialog, new RoutedEventArgs());
 					});
 					using var acknowledge = DialogAction<MessageDialog>(application, dialog =>
 					{
@@ -146,7 +154,9 @@ internal static class UiChecks
 						window.Close();
 						await window.Dispatcher.InvokeAsync(() => { }, DispatcherPriority.ApplicationIdle);
 						// The dialog helper answers only the first confirmation, so look for another one directly.
-						Check.True(!application.Windows.OfType<YesNoDialog>().Any(), "Do not repeat confirmation during asynchronous cleanup.");
+						Check.True(!application.Windows.OfType<YesNoDialog>().Any()
+							&& !application.Windows.OfType<SessionDispositionDialog>().Any(),
+							"Do not repeat confirmation during asynchronous cleanup.");
 						sessionChange.Release();
 						sessionChangeHeld = false;
 					}
@@ -155,7 +165,12 @@ internal static class UiChecks
 					Check.True(unhandled.Count == 0, "Closing must not raise an unhandled exception: " + string.Join("\r\n", unhandled));
 					Check.True(closed && confirmationDeferred, "Leave the original Closing event before showing confirmation and closing again.");
 					Check.Equal(1, confirmations, "Confirm exit exactly once");
+					Check.Equal(scenario == 1 ? 1 : 0, dispositions,
+						"Ask how to handle history exactly once when shutdown ends a live session");
 					Check.True(!window.IsSessionActive, "End the session before closing.");
+					if (endingSessionId is not null)
+						Check.Equal(0, SessionFileCount(workspace, endingSessionId),
+							"Abandoning during shutdown must delete the saved session history");
 					Check.Equal(0, errorNotices, "Exit without error notices");
 					Check.Equal(0, provider.Errors.Count, "Stop an active response without provider failures");
 				}
@@ -168,7 +183,7 @@ internal static class UiChecks
 					{
 						foreach (Window dialog in window.OwnedWindows.Cast<Window>().ToArray())
 							dialog.Close();
-						await window.EndSessionAsync();
+						await window.EndSessionAsync(SessionDisposition.Abandon);
 						SetField(window, "_closing", true);
 						SetField(window, "_closeApproved", true);
 						window.Close();
@@ -569,7 +584,25 @@ internal static class UiChecks
 			const string renderedRestoreSentinel = "saved-rendered-after-control";
 			chat.AddNotice($"binary-prefix{(char)0}{(char)2}{(char)26}{renderedRestoreSentinel}\r\n");
 			var sessionId = chat.SessionId!;
-			await window.EndSessionAsync();
+			var archiveRequests = ArchiveRequestCount(provider);
+			var storeDialogs = 0;
+			using (DialogAction<SessionDispositionDialog>(application, dialog =>
+			{
+				storeDialogs++;
+				Check.Equal("Summarize and Store", Control<Button>(dialog, "buttonStore").Content,
+					"Name the history-retaining choice");
+				Check.Equal("Abandon", Control<Button>(dialog, "buttonAbandon").Content,
+					"Name the destructive choice");
+				Invoke(dialog, "OnStore", dialog, new RoutedEventArgs());
+			}))
+			{
+				Check.True(await window.EndSessionAsync(), "The store choice must end the session.");
+			}
+			Check.Equal(1, storeDialogs, "Ask once whether to store or abandon the session");
+			Check.Equal(archiveRequests + 1, ArchiveRequestCount(provider),
+				"Summarize and Store must ask for one archive label");
+			Check.Equal(3, SessionFileCount(workspace, sessionId),
+				"Summarize and Store must retain the metadata and both transcripts");
 			string refreshedStandard = workspace.Write(
 				"current\\copilot-instructions.md", "REFRESHED_STANDARD_INSTRUCTION");
 			library.Instructions[refreshedStandard] = new()
@@ -608,13 +641,31 @@ internal static class UiChecks
 			await CheckTranscriptOpenedAtEndAsync(window, webView, "Resuming saved history", renderedRestoreSentinel);
 			Console.WriteLine("PASS failed-send recovery, stale-event isolation, Past Sessions viewing at the start, and UI resume at the end");
 
-			await window.EndSessionAsync();
+			archiveRequests = ArchiveRequestCount(provider);
+			var abandonDialogs = 0;
+			using (DialogAction<SessionDispositionDialog>(application, dialog =>
+			{
+				abandonDialogs++;
+				Invoke(dialog, "OnAbandon", dialog, new RoutedEventArgs());
+			}))
+			{
+				Check.True(await window.EndSessionAsync(), "The abandon choice must end the session.");
+			}
+			Check.Equal(1, abandonDialogs, "Ask once before abandoning a session");
+			Check.Equal(archiveRequests, ArchiveRequestCount(provider),
+				"Abandon must not ask the model for an archive label");
+			Check.Equal(0, SessionFileCount(workspace, sessionId),
+				"Abandon must delete the metadata and both transcripts");
+			Console.WriteLine("PASS session-end store and abandon choices");
+
 			var canceledStart = InvokeTask(window, "StartChatAsync", options, null);
-			var ending = window.EndSessionAsync();
+			var ending = window.EndSessionAsync(SessionDisposition.Abandon);
 			await Task.WhenAll(canceledStart, ending).WaitAsync(TimeSpan.FromSeconds(45));
 			Check.True(!window.IsSessionActive && Field<ChatService?>(window, "_chat") is null, "Ending during startup must not leave a late session behind.");
 			Check.Equal("Start or resume a session to begin.", Status(window), "Return to the initial state after canceling startup");
 			Console.WriteLine("PASS ending during startup without a ghost session");
+			await CheckResetDispositionAsync(application, window, workspace, provider, options);
+			await CheckReplacementDispositionAsync(application, window, workspace, provider, options);
 			await CheckReadmeOfferAsync(application, window, workspace, provider, options);
 			await CheckSessionWindowAsync(application, window, workspace, provider, options);
 			await CheckExternalLinkAsync(window, webView, externalStarts);
@@ -623,7 +674,7 @@ internal static class UiChecks
 		}
 		finally
 		{
-			await window.EndSessionAsync();
+			await window.EndSessionAsync(SessionDisposition.Abandon);
 			var exited = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
 			var hasBrowser = webView.CoreWebView2 is not null;
 			if (hasBrowser)
@@ -668,6 +719,104 @@ internal static class UiChecks
 		Console.WriteLine("PASS Rendered Markdown links open outside WebView2");
 	}
 
+	private static async Task CheckResetDispositionAsync(Application application, MainWindow window,
+		TestWorkspace workspace, LocalProvider provider, ChatSessionOptions options)
+	{
+		await InvokeTask(window, "StartChatAsync", options, null);
+		const string oldReply = "History that an abandoned reset must remove.";
+		provider.Replies.Enqueue(new LocalProvider.Reply(oldReply));
+		SetInput(window, "Create history before reset.");
+		Click(window, "buttonSend");
+		await Check.UntilAsync(() => Status(window).StartsWith("Ready..") && window.OutputText.Contains(oldReply),
+			"The reset fixture turn did not finish.");
+
+		var oldSessionId = Field<ChatService>(window, "_chat").SessionId!;
+		var archiveRequests = ArchiveRequestCount(provider);
+		var dispositionDialogs = 0;
+		using (DialogAction<SessionDispositionDialog>(application, dialog =>
+		{
+			dispositionDialogs++;
+			Invoke(dialog, "OnAbandon", dialog, new RoutedEventArgs());
+		}))
+		{
+			Invoke(window, "OnResetContext", window, new RoutedEventArgs());
+			await Check.UntilAsync(() =>
+				Field<ChatService?>(window, "_chat") is { SessionId: { } nextId }
+				&& nextId != oldSessionId
+				&& Status(window).StartsWith("Ready.."),
+				"Reset Context did not start a fresh session.", timeoutSeconds: 45);
+		}
+
+		Check.Equal(1, dispositionDialogs, "Reset Context must ask whether to store or abandon the old session");
+		Check.Equal(archiveRequests, ArchiveRequestCount(provider),
+			"Abandoning during Reset Context must not ask for an archive label");
+		Check.Equal(0, SessionFileCount(workspace, oldSessionId),
+			"Abandoning during Reset Context must delete the old saved history");
+		Check.True(!window.OutputText.Contains(oldReply)
+			&& window.OutputText.Contains("Context cleared. The model starts from nothing."),
+			"An abandoned reset must clear the old visible transcript and show the reset marker.");
+
+		var newSessionId = Field<ChatService>(window, "_chat").SessionId!;
+		await window.EndSessionAsync(SessionDisposition.Abandon);
+		Check.Equal(0, SessionFileCount(workspace, newSessionId), "Clean up the reset fixture session");
+		Console.WriteLine("PASS Reset Context asks for disposition and abandons without summarizing");
+	}
+
+	private static async Task CheckReplacementDispositionAsync(Application application, MainWindow window,
+		TestWorkspace workspace, LocalProvider provider, ChatSessionOptions options)
+	{
+		await InvokeTask(window, "StartChatAsync", options, null);
+		provider.Replies.Enqueue(new LocalProvider.Reply("History before replacement."));
+		SetInput(window, "Create history before replacement.");
+		Click(window, "buttonSend");
+		await Check.UntilAsync(() => Status(window).StartsWith("Ready..")
+			&& window.OutputText.Contains("History before replacement."),
+			"The replacement fixture turn did not finish.");
+
+		var current = Field<ChatService>(window, "_chat");
+		var oldSessionId = current.SessionId!;
+		var archiveRequests = ArchiveRequestCount(provider);
+		using (DialogAction<SessionDispositionDialog>(application,
+			dialog => Invoke(dialog, "OnCancel", dialog, new RoutedEventArgs())))
+		{
+			Check.True(!await window.EndSessionAsync(), "Canceling the disposition prompt must keep the session running.");
+		}
+		Check.True(ReferenceEquals(current, Field<ChatService>(window, "_chat")) && window.IsSessionActive,
+			"Canceling session disposal must leave the current runtime active.");
+		Check.Equal(3, SessionFileCount(workspace, oldSessionId),
+			"Canceling session disposal must retain its saved history.");
+		Check.Equal(archiveRequests, ArchiveRequestCount(provider),
+			"Canceling session disposal must not summarize.");
+
+		var dispositions = 0;
+		var handoffQuestions = 0;
+		using var chooseAbandon = DialogAction<SessionDispositionDialog>(application, dialog =>
+		{
+			dispositions++;
+			Invoke(dialog, "OnAbandon", dialog, new RoutedEventArgs());
+		});
+		using var rejectUnexpectedHandoff = DialogAction<YesNoDialog>(application, dialog =>
+		{
+			handoffQuestions++;
+			Invoke(dialog, "OnNo", dialog, new RoutedEventArgs());
+		});
+		await InvokeTask(window, "StartFromSettingsAsync",
+			options with { ApplyInstructions = !options.ApplyInstructions });
+
+		Check.Equal(1, dispositions, "Replacing a live session must ask how its history should end");
+		Check.Equal(0, handoffQuestions, "Abandoning a session must not ask the model for a hand-off summary");
+		Check.Equal(archiveRequests, ArchiveRequestCount(provider),
+			"Abandoning a replaced session must not ask for an archive label");
+		Check.Equal(0, SessionFileCount(workspace, oldSessionId),
+			"Abandoning a replaced session must delete its saved history");
+		Check.True(window.IsSessionActive
+			&& !string.Equals(oldSessionId, Field<ChatService>(window, "_chat").SessionId, StringComparison.Ordinal),
+			"Replacement must continue with a fresh live session after abandoning the old one.");
+
+		await window.EndSessionAsync(SessionDisposition.Abandon);
+		Console.WriteLine("PASS replacement cancel and abandon choices");
+	}
+
 	/// <summary>
 	/// The readme offer that opens a session on a project. The check
 	/// covers the three outcomes that matter: declining sends nothing,
@@ -684,7 +833,7 @@ internal static class UiChecks
 			await InvokeTask(window, "StartFromSettingsAsync", options);
 		await Check.UntilAsync(() => window.IsSessionActive && Status(window).StartsWith("Ready.."), "The declined session did not settle.", timeoutSeconds: 45);
 		Check.Equal(sent, provider.Requests.Count, "Declining the readme must send nothing");
-		await window.EndSessionAsync();
+		await window.EndSessionAsync(SessionDisposition.Abandon);
 
 		provider.Replies.Enqueue(new LocalProvider.Reply("Read the project readme."));
 		using (DialogAction<YesNoDialog>(application, dialog => Invoke(dialog, "OnYes", dialog, new RoutedEventArgs())))
@@ -705,11 +854,13 @@ internal static class UiChecks
 			Invoke(dialog, "OnNo", dialog, new RoutedEventArgs());
 		};
 		answerAll.Start();
+		using var disposition = DialogAction<SessionDispositionDialog>(application,
+			dialog => Invoke(dialog, "OnStore", dialog, new RoutedEventArgs()));
 		try { await InvokeTask(window, "StartFromSettingsAsync", options with { ApplyInstructions = !options.ApplyInstructions }); }
 		finally { answerAll.Stop(); }
 		Check.True(window.IsSessionActive, "The restarted session must be running.");
 		Check.Equal(1, asked, "A restart may ask about the hand-off, but must not offer the readme again.");
-		await window.EndSessionAsync();
+		await window.EndSessionAsync(SessionDisposition.Abandon);
 		Console.WriteLine("PASS workspace readme offer, attachment send, and restart suppression");
 	}
 
@@ -741,6 +892,8 @@ internal static class UiChecks
 
 		var restart = live with { ApplyInstructions = false };
 		provider.Replies.Enqueue(SessionFeatureChecks.HandoffReply());
+		using (var disposition = DialogAction<SessionDispositionDialog>(application,
+			dialog => Invoke(dialog, "OnStore", dialog, new RoutedEventArgs())))
 		using (var timer = DialogAction<YesNoDialog>(application, dialog => Invoke(dialog, "OnYes", dialog, new RoutedEventArgs())))
 			await InvokeTask(window, "StartFromSettingsAsync", restart);
 		var restarted = Field<ChatService>(window, "_chat");
@@ -757,12 +910,16 @@ internal static class UiChecks
 		Check.True(request.Contains(SessionFeatureChecks.HandoffMarker) && request.Contains("Please summarize README.md."),
 			"Pass the hand-off and the earlier request to the new model.");
 
+		using (var disposition = DialogAction<SessionDispositionDialog>(application,
+			dialog => Invoke(dialog, "OnStore", dialog, new RoutedEventArgs())))
 		using (var timer = DialogAction<YesNoDialog>(application, dialog => Invoke(dialog, "OnNo", dialog, new RoutedEventArgs())))
 			await InvokeTask(window, "StartFromSettingsAsync", live);
 		Check.True(Field<ChatService>(window, "_chat").Record!.Bootstrap is null, "Declining the hand-off must start without it.");
 
 		var fresh = Field<ChatService>(window, "_chat");
-		await InvokeTask(window, "StartFromSettingsAsync", restart);
+		using (DialogAction<SessionDispositionDialog>(application,
+			dialog => Invoke(dialog, "OnStore", dialog, new RoutedEventArgs())))
+			await InvokeTask(window, "StartFromSettingsAsync", restart);
 		Check.True(!ReferenceEquals(fresh, Field<ChatService>(window, "_chat")) && Field<ChatService>(window, "_chat").Record!.Bootstrap is null,
 			"Restart a session without a conversation without offering a hand-off.");
 		provider.Replies.Enqueue(new LocalProvider.Reply("Context for a canceled restart."));
@@ -774,11 +931,13 @@ internal static class UiChecks
 		provider.Replies.Enqueue(held);
 		try
 		{
+			using (var disposition = DialogAction<SessionDispositionDialog>(application,
+				dialog => Invoke(dialog, "OnStore", dialog, new RoutedEventArgs())))
 			using (var timer = DialogAction<YesNoDialog>(application, dialog => Invoke(dialog, "OnYes", dialog, new RoutedEventArgs())))
 			{
 				var restarting = InvokeTask(window, "StartFromSettingsAsync", live);
 				await held.Started.Task.WaitAsync(TimeSpan.FromSeconds(15));
-				await Task.WhenAll(window.EndSessionAsync(), restarting).WaitAsync(TimeSpan.FromSeconds(30));
+				await Task.WhenAll(window.EndSessionAsync(SessionDisposition.Abandon), restarting).WaitAsync(TimeSpan.FromSeconds(30));
 			}
 		}
 		finally { held.Release.TrySetResult(); }
@@ -1486,6 +1645,8 @@ internal static class UiChecks
 				"The running session must not be offered for deletion.");
 			Check.True(!Control<Button>(dialog, "buttonResume").IsEnabled,
 				"The running session must not be offered for resuming.");
+			Check.True(!Control<Button>(dialog, "buttonView").IsEnabled,
+				"The running session is already open and must not be offered for offline viewing.");
 
 			list.SelectedItems.Clear();
 			foreach (var record in sessions.Where(record => record.SessionId != "keep-me"))
@@ -1840,6 +2001,14 @@ internal static class UiChecks
 		return new TimerStop(timer);
 	}
 
+	private static int ArchiveRequestCount(LocalProvider provider) =>
+		provider.Requests.Count(request =>
+			request.GetRawText().Contains(ChatService.ArchiveMarker, StringComparison.OrdinalIgnoreCase));
+
+	private static int SessionFileCount(TestWorkspace workspace, string sessionId) =>
+		new[] { ".json", ".md", ".rendered.md" }
+			.Count(extension => File.Exists(Path.Combine(workspace.HistoryDirectory, sessionId + extension)));
+
 	private sealed class TimerStop(DispatcherTimer timer) : IDisposable
 	{
 		public void Dispose() => timer.Stop();
@@ -1988,17 +2157,25 @@ internal static class UiChecks
 		tabs.SelectedIndex = 0;
 		await window.Dispatcher.InvokeAsync(() => { }, DispatcherPriority.ApplicationIdle);
 		var renderedReady = false;
+		var renderedOffset = double.NaN;
+		var renderedHasText = false;
+		var renderedLength = 0;
 		for (var attempt = 0; attempt < 100 && !renderedReady; attempt++)
 		{
 			using var result = JsonDocument.Parse(await webView.CoreWebView2.ExecuteScriptAsync(
-				$"({{offset: window.scrollY, hasText: document.getElementById('output').textContent.includes({JsonSerializer.Serialize(requiredRenderedText)})}})"));
-			renderedReady = result.RootElement.GetProperty("offset").GetDouble() < 1
-				&& result.RootElement.GetProperty("hasText").GetBoolean();
+				$"({{offset: window.scrollY, hasText: document.getElementById('output').textContent.includes({JsonSerializer.Serialize(requiredRenderedText)}),"
+				+ " length: document.getElementById('output').textContent.length})"));
+			renderedOffset = result.RootElement.GetProperty("offset").GetDouble();
+			renderedHasText = result.RootElement.GetProperty("hasText").GetBoolean();
+			renderedLength = result.RootElement.GetProperty("length").GetInt32();
+			renderedReady = renderedOffset < 1 && renderedHasText;
 			if (!renderedReady)
 				await Task.Delay(50);
 		}
 		Check.True(renderedReady,
-			$"{operation} must restore the Rendered transcript and open it at its first line.");
+			$"{operation} must restore the Rendered transcript and open it at its first line. "
+			+ $"Offset: {renderedOffset:0.##}; required text: {renderedHasText}; DOM text length: {renderedLength}; "
+			+ $"buffer length: {window.RenderedText.Length}.");
 	}
 
 	private static async Task CheckTranscriptOpenedAtEndAsync(MainWindow window, WebView2 webView, string operation,

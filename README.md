@@ -74,7 +74,9 @@ If the file does not exist, it is created from the bundled defaults. The default
 - **Reset Context** starts a fresh conversation with the same settings.
 - **Past Sessions** lets you view, resume, or delete saved sessions. Use Ctrl or Shift to select multiple sessions for deletion.
 - The active session cannot be deleted while it is running.
-- Session summaries are generated when a session ends and shown in the Past Sessions list.
+- Ending or replacing a session, resetting context, and closing the program ask how to handle the session history.
+  - **Summarize and Store** generates a short summary and keeps the history in Past Sessions.
+  - **Abandon** skips summarization and deletes the saved history.
 - Workspace changes are shown after each turn that modifies files. Files can be reviewed, compared, or reverted where Git history is available.
 
 Sessions are stored under:

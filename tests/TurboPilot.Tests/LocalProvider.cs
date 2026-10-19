@@ -175,9 +175,10 @@ internal sealed class LocalProvider : IAsyncDisposable
 		}
 		finally
 		{
-			// A response still open when the provider stops cannot be closed on the released listener.
+			// The provider or an abandoned session may close the connection
+			// before this response cleanup reaches the listener.
 			try { context.Response.Close(); }
-			catch (Exception ex) when (_stopping.IsCancellationRequested && ex is ObjectDisposedException or HttpListenerException) { }
+			catch (Exception ex) when (ex is ObjectDisposedException or HttpListenerException or IOException) { }
 		}
 	}
 
