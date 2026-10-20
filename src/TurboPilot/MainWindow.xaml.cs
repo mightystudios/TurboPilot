@@ -12,6 +12,7 @@ using TurboPilot.Ai;
 using TurboPilot.Commands;
 using TurboPilot.Customizations;
 using TurboPilot.Dialogs;
+using TurboPilot.Orchestration;
 using TurboPilot.Rendering;
 using TurboPilot.Sessions;
 using TurboPilot.Tools;
@@ -84,6 +85,8 @@ public partial class MainWindow : TurbolandWindow
 	private bool _closing;
 	private bool _closeRequested;
 	private bool _closeApproved;
+	private string? _lastSessionFailure;
+	private SessionStatusController? _launchStatus;
 
 	// Model and session id of the live session. The badge shows the model
 	// over the workspace folder; the id identifies the session elsewhere.
@@ -1254,6 +1257,77 @@ public partial class MainWindow : TurbolandWindow
 			await OfferWorkspaceReadmeAsync();
 	}
 
+	internal async Task<bool> StartFromLaunchRequestAsync(
+		ValidatedSessionLaunchRequest launch,
+		SessionStatusController status,
+		ChatSessionOptions? resolvedOptions = null)
+	{
+		if (!IsLoaded)
+			throw new InvalidOperationException("The window must be loaded before an external session starts.");
+		if (_launchStatus is not null)
+			throw new InvalidOperationException("This window already owns an external session launch.");
+
+		_launchStatus = status;
+		using var cancellation = new CancellationTokenSource();
+		_restartCancellation = cancellation;
+		_sessionChanging = true;
+		SetSessionActive(IsSessionActive);
+		try
+		{
+			var options = resolvedOptions ?? await SessionOptionsFactory.ResolveSavedAsync(
+				launch.Request.Workspace,
+				launch.Request.Mode,
+				launch.Customizations,
+				cancellationToken: cancellation.Token);
+			cancellation.Token.ThrowIfCancellationRequested();
+
+			status.Connecting();
+			_sessionChanging = false;
+			if (!await StartChatCoreAsync(
+				options,
+				null,
+				null,
+				SessionDisposition.Abandon,
+				launch.Customizations))
+			{
+				status.Failed(_lastSessionFailure ?? "The session could not be started.");
+				return false;
+			}
+
+			var chat = _chat ?? throw new InvalidOperationException(
+				"The session connected without an active chat service.");
+			_promptHistory.Add(launch.Request.InitialPrompt);
+			UpdateHistoryButtons();
+			_sendingInput = true;
+			Sounds.PlayPromptSent();
+			SetSessionActive(true);
+			await SessionLaunch.SubmitInitialPromptAsync(
+				chat, launch.Request, cancellation.Token);
+			status.Connected();
+			return true;
+		}
+		catch (OperationCanceledException) when (cancellation.IsCancellationRequested)
+		{
+			status.Failed("The external session launch was canceled before its initial prompt was submitted.");
+			return false;
+		}
+		catch (Exception ex)
+		{
+			_lastSessionFailure = ex.Message;
+			status.Failed(ex.Message);
+			AppendOutput($"\r\n[error] External session launch failed: {ex.Message}\r\n\r\n");
+			return false;
+		}
+		finally
+		{
+			if (ReferenceEquals(_restartCancellation, cancellation))
+				_restartCancellation = null;
+			_sessionChanging = false;
+			_sendingInput = false;
+			RefreshChatState();
+		}
+	}
+
 	/// <summary>
 	/// Offers to open a session on a new project by sending its readme, so
 	/// the model starts with the project's own description of itself. The
@@ -1380,7 +1454,8 @@ public partial class MainWindow : TurbolandWindow
 		StartChatCoreAsync(options, resumeId, null);
 
 	private async Task<bool> StartChatCoreAsync(ChatSessionOptions options, string? resumeId,
-		SummaryBootstrap? bootstrap, SessionDisposition? disposition = null)
+		SummaryBootstrap? bootstrap, SessionDisposition? disposition = null,
+		CustomizationLibrary? suppliedCustomizations = null)
 	{
 		await _sessionChange.WaitAsync();
 		using var cancellation = new CancellationTokenSource();
@@ -1389,10 +1464,12 @@ public partial class MainWindow : TurbolandWindow
 		SetSessionActive(IsSessionActive);
 		try
 		{
+			_lastSessionFailure = null;
 			// A resume keeps its saved TurboPilot-specific lists but refreshes
 			// the standard instruction files. A new session uses the full
 			// current scan.
-			var currentCustomizations = _collectCustomizations(options.WorkspaceFolder).Clone();
+			var currentCustomizations = suppliedCustomizations?.Clone()
+				?? _collectCustomizations(options.WorkspaceFolder).Clone();
 			options = options with
 			{
 				Customizations = resumeId is not null && options.Customizations.HasItems
@@ -1412,6 +1489,7 @@ public partial class MainWindow : TurbolandWindow
 			chat.NoticeReceived += text => ForActiveChat(chat, () => ShowNotice(text));
 			chat.ErrorReceived += text => ForActiveChat(chat, () => AppendOutput($"\r\n[error] {text}\r\n\r\n"));
 			chat.StateChanged += () => ForActiveChat(chat, RefreshChatState);
+			_launchStatus?.Attach(chat);
 			chat.UsageChanged += () => ForActiveChat(chat, () =>
 			{
 				_ctxUsed = chat.ContextUsedTokens;
@@ -1468,6 +1546,7 @@ public partial class MainWindow : TurbolandWindow
 		}
 		catch (Exception ex)
 		{
+			_lastSessionFailure = ex.Message;
 			AppendOutput($"\r\n[error] Session start failed: {ex.Message}\r\n\r\n");
 			await EndChatCoreAsync(resumeId is null
 				? SessionDisposition.Abandon
@@ -1517,6 +1596,20 @@ public partial class MainWindow : TurbolandWindow
 				Sounds.PlayTurnComplete();
 		}
 		SetSessionActive(_chat is not null);
+	}
+
+	internal void RequestLaunchAttention()
+	{
+		if (!Dispatcher.CheckAccess())
+		{
+			Dispatcher.BeginInvoke(new Action(RequestLaunchAttention));
+			return;
+		}
+		if (WindowState == WindowState.Minimized)
+			WindowState = WindowState.Normal;
+		if (!IsVisible)
+			Show();
+		Activate();
 	}
 
 	private async void OnPastSessions(object sender, RoutedEventArgs e)
@@ -2431,10 +2524,12 @@ public partial class MainWindow : TurbolandWindow
 				System.Windows.Threading.DispatcherPriority.Normal);
 			if (!Dialogs.YesNoDialog.Ask(this, "Exit the Program?"))
 				return;
+			_launchStatus?.Closing();
 			_closing = true;
 			if (!await EndSessionAsync())
 			{
 				_closing = false;
+				_launchStatus?.CancelClosing();
 				RefreshChatState();
 				return;
 			}
@@ -2455,6 +2550,8 @@ public partial class MainWindow : TurbolandWindow
 
 	protected override void OnClosed(EventArgs e)
 	{
+		_launchStatus?.Closed();
+		_launchStatus?.Dispose();
 		_attachments.Clear();
 		PruneImagePreviews();
 		webViewOutput.Dispose();

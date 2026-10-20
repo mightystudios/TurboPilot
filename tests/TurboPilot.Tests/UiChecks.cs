@@ -14,6 +14,7 @@ using TurboPilot.Attachments;
 using TurboPilot.Ai;
 using TurboPilot.Customizations;
 using TurboPilot.Dialogs;
+using TurboPilot.Orchestration;
 using TurboPilot.Rendering;
 using TurboPilot.Sessions;
 using TurboPilot.Tools;
@@ -425,9 +426,6 @@ internal static class UiChecks
 		var library = workspace.CreateLibrary();
 		var externalStarts = new List<System.Diagnostics.ProcessStartInfo>();
 		TurbolandTheme.Wpf.TurbolandTheme.Apply(application, TurbolandTheme.Core.ThemeMode.Authentic);
-		var window = new MainWindow(workspace.Store, workspace.CreateChat, _ => library, Path.Combine(workspace.Root, "browser"),
-			workspace.ScriptsPath, externalStarts.Add);
-		TurbolandTheme.Wpf.TurbolandTheme.ApplyTo(window);
 		var options = new ChatSessionOptions
 		{
 			WorkspaceFolder = workspace.Workspace,
@@ -436,6 +434,10 @@ internal static class UiChecks
 			ByokEndpoint = provider.Endpoint,
 			ContextWindowTokens = 32768,
 		};
+		await CheckExternalSessionLaunchAsync(application, workspace, provider, library, options);
+		var window = new MainWindow(workspace.Store, workspace.CreateChat, _ => library, Path.Combine(workspace.Root, "browser"),
+			workspace.ScriptsPath, externalStarts.Add);
+		TurbolandTheme.Wpf.TurbolandTheme.ApplyTo(window);
 		var webView = Control<WebView2>(window, "webViewOutput");
 		try
 		{
@@ -686,6 +688,81 @@ internal static class UiChecks
 				await exited.Task.WaitAsync(TimeSpan.FromSeconds(15));
 		}
 	}
+
+	private static async Task CheckExternalSessionLaunchAsync(
+		Application application,
+		TestWorkspace workspace,
+		LocalProvider provider,
+		CustomizationLibrary library,
+		ChatSessionOptions options)
+	{
+		var workOrder = workspace.Write(
+			"workspace\\requests\\ui-work-order.md", "UI_ATTACHMENT_SENTINEL");
+		var request = new SessionLaunchRequest
+		{
+			ContractVersion = SessionLaunchRequest.CurrentContractVersion,
+			LaunchId = "ui-launch",
+			SessionLabel = "UI external launch",
+			Workspace = workspace.Workspace,
+			Attachments = [workOrder],
+			InitialPrompt = "Execute the attached UI work order.",
+			Mode = "Standard",
+			SessionStatusPath = Path.Combine(
+				workspace.Workspace, ".ai", "session-runs", "ui", "session-status.json"),
+		};
+		var launch = new ValidatedSessionLaunchRequest(request, library);
+		var window = new MainWindow(
+			workspace.Store,
+			workspace.CreateChat,
+			_ => library,
+			Path.Combine(workspace.Root, "launch-browser"));
+		TurbolandTheme.Wpf.TurbolandTheme.ApplyTo(window);
+		var status = new SessionStatusController(
+			request, window.RequestLaunchAttention);
+		var before = provider.Requests.Count;
+		var held = new LocalProvider.Reply("UI external launch reply.", Hold: true);
+		provider.Replies.Enqueue(held);
+		try
+		{
+			window.Show();
+			var started = window.StartFromLaunchRequestAsync(
+				launch, status, options with { Customizations = library });
+			await held.Started.Task.WaitAsync(TimeSpan.FromSeconds(45));
+			Check.True(await started.WaitAsync(TimeSpan.FromSeconds(45)),
+				"The external launch window did not start its session.");
+			Check.True(window.IsSessionActive
+				&& ReadLaunchStatus(request.SessionStatusPath).State == SessionStatusStates.Running,
+				"The external launch window did not report its automatic turn.");
+			Check.Equal(before + 1, provider.Requests.Count,
+				"The external launch window must submit exactly one initial prompt.");
+			var sent = provider.Requests.Last().GetRawText();
+			Check.True(sent.Contains(request.InitialPrompt, StringComparison.Ordinal)
+				&& sent.Contains(workOrder.Replace("\\", "\\\\"), StringComparison.Ordinal),
+				"The external launch window must send the requested prompt and attachment.");
+			Check.True(workspace.Store.Load(Field<ChatService>(window, "_chat").SessionId!)
+				.Prompts.Contains(request.InitialPrompt),
+				"The automatic prompt must use normal session history.");
+			held.Release.TrySetResult();
+			await Check.UntilAsync(
+				() => ReadLaunchStatus(request.SessionStatusPath).State == SessionStatusStates.Idle,
+				"The external launch window did not report idle after its automatic turn.");
+			Console.WriteLine("PASS WPF external launch starts one fresh session and submits one attached prompt");
+		}
+		finally
+		{
+			held.Release.TrySetResult();
+			await window.EndSessionAsync(SessionDisposition.Abandon);
+			status.Closing();
+			SetField(window, "_closing", true);
+			SetField(window, "_closeApproved", true);
+			window.Close();
+		}
+	}
+
+	private static SessionStatusRecord ReadLaunchStatus(string path) =>
+		JsonSerializer.Deserialize<SessionStatusRecord>(
+			File.ReadAllText(path), SessionLaunchRequest.JsonOptions)
+		?? throw new InvalidOperationException("The session status file is empty.");
 
 	private static async Task CheckExternalLinkAsync(
 		MainWindow window,

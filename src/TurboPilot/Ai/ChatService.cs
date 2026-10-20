@@ -44,6 +44,7 @@ public sealed partial class ChatService : IAsyncDisposable
 	private long _turnStarted;
 	private long _warmupStarted;
 	private long _lastActivity;
+	private DateTimeOffset _lastSubstantiveActivityAt;
 	private long _sessionAicNano;
 	private TaskCompletionSource? _turnIdle;
 	private StringBuilder? _capture;
@@ -62,6 +63,7 @@ public sealed partial class ChatService : IAsyncDisposable
 	private string? _planMessageId;
 	private Task _planTail = Task.CompletedTask;
 	private string? _deferredTimeoutMessage;
+	private string? _failureMessage;
 
 	// Tool calls awaiting their outcome, so the completion can be
 	// written into the row the start opened rather than printed as a
@@ -115,6 +117,14 @@ public sealed partial class ChatService : IAsyncDisposable
 	public string Model => _options.Model;
 	public bool IsWorking => _isWorking;
 	public bool IsWarming { get { lock (_sync) return _isWarming; } }
+	public DateTimeOffset LastSubstantiveActivityAt
+	{
+		get { lock (_sync) return _lastSubstantiveActivityAt; }
+	}
+	public string? FailureMessage
+	{
+		get { lock (_sync) return _failureMessage; }
+	}
 	public ChatSessionOptions Options => _options;
 	// The settings the session is headed for: a change waiting for the current turn to end, or the active settings.
 	public ChatSessionOptions RequestedOptions
@@ -202,6 +212,8 @@ public sealed partial class ChatService : IAsyncDisposable
 				_connecting = true;
 				_connectionStarted = Stopwatch.GetTimestamp();
 				_lastActivity = _connectionStarted;
+				_lastSubstantiveActivityAt = DateTimeOffset.UtcNow;
+				_failureMessage = null;
 				_maintenanceTask ??= MaintainSessionAsync();
 			}
 			StateChanged?.Invoke();
@@ -283,8 +295,10 @@ public sealed partial class ChatService : IAsyncDisposable
 			StateChanged?.Invoke();
 			UsageChanged?.Invoke();
 		}
-		catch
+		catch (Exception ex)
 		{
+			lock (_sync) _failureMessage = ex.Message;
+			StateChanged?.Invoke();
 			if (starting)
 				await CloseRuntimeAsync();
 			throw;
@@ -363,6 +377,8 @@ public sealed partial class ChatService : IAsyncDisposable
 				_isWorking = true;
 				_turnStarted = Stopwatch.GetTimestamp();
 				_lastActivity = _turnStarted;
+				_lastSubstantiveActivityAt = DateTimeOffset.UtcNow;
+				_failureMessage = null;
 				_deferredTimeoutMessage = null;
 				_turnIdle = new(TaskCreationOptions.RunContinuationsAsynchronously);
 			}
@@ -616,7 +632,11 @@ public sealed partial class ChatService : IAsyncDisposable
 
 	private void TouchActivity()
 	{
-		lock (_sync) _lastActivity = Stopwatch.GetTimestamp();
+		lock (_sync)
+		{
+			_lastActivity = Stopwatch.GetTimestamp();
+			_lastSubstantiveActivityAt = DateTimeOffset.UtcNow;
+		}
 	}
 
 	private static bool IsTimeoutError(SessionErrorData error) =>
@@ -723,6 +743,8 @@ public sealed partial class ChatService : IAsyncDisposable
 			if (_questions.TryPeek(out var next))
 				AddNotice(next.Text, next.Rendered);
 			question.Completion.TrySetResult(response);
+			_lastActivity = Stopwatch.GetTimestamp();
+			_lastSubstantiveActivityAt = DateTimeOffset.UtcNow;
 		}
 		StateChanged?.Invoke();
 		return true;
@@ -901,7 +923,10 @@ public sealed partial class ChatService : IAsyncDisposable
 			{
 				_lastActivity = Stopwatch.GetTimestamp();
 				if (IsSubstantiveActivity(evt))
+				{
+					_lastSubstantiveActivityAt = DateTimeOffset.UtcNow;
 					_deferredTimeoutMessage = null;
+				}
 				switch (evt)
 				{
 					case AssistantTurnStartEvent:
@@ -967,6 +992,7 @@ public sealed partial class ChatService : IAsyncDisposable
 						break;
 					case SessionErrorEvent error:
 						_deferredTimeoutMessage = null;
+						_failureMessage = error.Data.Message;
 						AddNotice(NoticeFormatter.Status("error", error.Data.Message));
 						_isWorking = false;
 						_turnStarted = 0;

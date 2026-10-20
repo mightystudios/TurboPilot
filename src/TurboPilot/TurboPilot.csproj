@@ -52,6 +52,11 @@
 		<None Include="Assets\**">
 			<CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
 		</None>
+		<None Update="Assets\session-launch-capabilities.json">
+			<TargetPath>session-launch-capabilities.json</TargetPath>
+			<CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+			<CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+		</None>
 	</ItemGroup>
 
 	<ItemGroup>

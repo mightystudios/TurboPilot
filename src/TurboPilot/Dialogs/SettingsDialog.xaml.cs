@@ -445,20 +445,17 @@ public partial class SettingsDialog : TurbolandFloatingDialog
 	{
 		var modelIndex = comboModel.SelectedIndex;
 		var hasModel = modelIndex >= 0 && modelIndex < _models.Count;
-		return new ChatSessionOptions
-		{
-			WorkspaceFolder = workspace,
-			Model = hasModel ? _models[modelIndex].Id : "",
-			ContextWindowTokens = hasModel ? _models[modelIndex].ContextWindowTokens : 0,
-			ReasoningEffort = comboEffort.SelectedItem as string ?? "",
-			Mode = comboMode.SelectedItem as string ?? "Standard",
-			UseByok = IsByok,
-			ByokEndpoint = IsByok && TryBuildEndpoint(out var endpoint, out _) ? endpoint : ByokEndpoint,
-			ByokApiKey = IsByok ? textBoxApiKey.Text.Trim() : "",
-			ApplyInstructions = checkApplyInstructions.IsChecked == true,
-			PreloadSkills = checkPreloadSkills.IsChecked == true,
-			LinkFiles = checkLinkFiles.IsChecked == true,
-		};
+		return SessionOptionsFactory.Create(
+			workspace,
+			hasModel ? _models[modelIndex] : null,
+			comboEffort.SelectedItem as string,
+			comboMode.SelectedItem as string ?? "Standard",
+			IsByok,
+			IsByok && TryBuildEndpoint(out var endpoint, out _) ? endpoint : "",
+			textBoxApiKey.Text,
+			checkApplyInstructions.IsChecked == true,
+			checkPreloadSkills.IsChecked == true,
+			checkLinkFiles.IsChecked == true);
 	}
 
 	// -- Sibling dialogs ------------------------------------------------------

@@ -1,0 +1,17 @@
+{
+  "contractVersion": "1.0",
+  "launchArgument": "--launch-request",
+  "requestTransport": "json-file",
+  "statusTransport": "json-file",
+  "supportsAttachments": true,
+  "sessionStates": [
+    "starting",
+    "connecting",
+    "running",
+    "waiting_user",
+    "idle",
+    "failed",
+    "closing",
+    "closed"
+  ]
+}

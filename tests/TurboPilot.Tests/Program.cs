@@ -8,6 +8,7 @@ internal static class Program
 		{
 			await CoreChecks.RunAsync();
 			RenderingChecks.Run();
+			await SessionLaunchChecks.RunAsync(args.Contains("--runtime"));
 			if (args.Contains("--runtime"))
 			{
 				await RuntimeChecks.RunAsync();

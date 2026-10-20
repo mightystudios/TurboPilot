@@ -87,6 +87,72 @@ Sessions are stored under:
 
 Transcripts, rendered transcripts, and session metadata are saved separately. Provider credentials are not copied into session metadata.
 
+## External session launch and monitoring
+
+Published builds include `session-launch-capabilities.json` beside `TurboPilot.exe`. Any local tool can check this file before launching TurboPilot, start a fresh configured session, submit its first prompt, and monitor its health without automating the UI:
+
+```powershell
+.\TurboPilot.exe --launch-request 'D:\absolute\path\launch-request.json'
+```
+
+Launching `TurboPilot.exe` without arguments keeps the normal interactive startup. Every other argument shape is rejected with a nonzero exit code. The launch request path, workspace, and session-status path must be absolute. The workspace must exist, the status path must end in `.json`, and each optional attachment must be an absolute existing file contained by the workspace.
+
+The version `1.0` launch request is:
+
+```json
+{
+  "contractVersion": "1.0",
+  "launchId": "nightly-refactor-20261019",
+  "sessionLabel": "Nightly refactor",
+  "workspace": "D:\\dev\\projects\\ExampleApp",
+  "attachments": [
+    "D:\\dev\\projects\\ExampleApp\\automation\\work-order.md",
+    "D:\\dev\\projects\\ExampleApp\\automation\\context.json"
+  ],
+  "initialPrompt": "Complete the attached work order and report any blockers.",
+  "mode": "Autopilot",
+  "sessionStatusPath": "D:\\dev\\projects\\ExampleApp\\.ai\\session-runs\\nightly-refactor-20261019\\session-status.json"
+}
+```
+
+`launchId` is a caller-defined correlation identifier copied into every status record. `attachments` is optional and may be empty. TurboPilot rescans customizations for the requested workspace before resolving `mode`. Built-in modes are `Standard`, `Plan`, and `Autopilot`; a custom mode must name an enabled custom agent. Provider, model, reasoning effort, API credentials, instruction loading, skill preloading, and Rendered file linking come from settings already saved in TurboPilot. The initial prompt is not added to application settings. After the fresh session connects, TurboPilot sends that prompt once with all requested attachments.
+
+TurboPilot atomically owns and updates the requested status file. Its version `1.0` schema is:
+
+```json
+{
+  "contractVersion": "1.0",
+  "launchId": "nightly-refactor-20261019",
+  "sessionLabel": "Nightly refactor",
+  "processId": 12345,
+  "sessionId": "ExampleApp-20261019-...",
+  "workspace": "D:\\dev\\projects\\ExampleApp",
+  "state": "running",
+  "startedAt": "2026-10-20T01:00:00+00:00",
+  "updatedAt": "2026-10-20T01:00:15+00:00",
+  "lastActivityAt": "2026-10-20T01:00:14+00:00",
+  "isWorking": true,
+  "hasPendingQuestion": false,
+  "error": null
+}
+```
+
+| State | Meaning |
+| --- | --- |
+| `starting` | The request is valid and launch setup is underway |
+| `connecting` | TurboPilot is connecting a fresh SDK session |
+| `running` | The model turn is active |
+| `waiting_user` | The active turn is waiting for an in-chat answer |
+| `idle` | The session is connected with no active turn |
+| `failed` | Startup or runtime failed; `error` explains the failure |
+| `closing` | Normal window/session shutdown is underway |
+| `closed` | Normal shutdown completed |
+
+While a turn remains `running`, `updatedAt` advances at least every 15 seconds. The heartbeat stops while idle or waiting for the user. The first `waiting_user` transition brings the TurboPilot window to the user's attention. Status files never contain provider credentials, permission grants, prompts, responses, or transcript content.
+
+The external tool owns completion criteria, retry policy, follow-up actions, and any result files. TurboPilot does not parse prompts, attachments, or transcripts to make external workflow decisions, and `idle` means only that the chat session is idle. Each process must receive its own request and status paths. Normal window close keeps the existing confirmation and session-history choice, writes `closing`, and then writes `closed`; forcibly terminating the process can leave the last health record in place, so monitoring tools should also watch `processId`.
+
+
 ## Regression checks
 
 Run the dependency-free checks from the repository root:
