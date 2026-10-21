@@ -7,6 +7,7 @@
 	Title="Customization" Width="960" Height="493">
 
     <ctl:TurbolandFloatingDialog.Resources>
+        <BooleanToVisibilityConverter x:Key="BooleanToVisibilityConverter"/>
         <!-- One row of a found-items list: the checkmark is the only hit
         target for toggling, so the name sits in its own TextBlock and a
         click there just selects the row for the details pane. -->
@@ -14,6 +15,9 @@
             <StackPanel Orientation="Horizontal">
             	<CheckBox IsChecked="{Binding Enabled, Mode=TwoWay}" VerticalAlignment="Center"/>
             	<TextBlock Text="{Binding Name}" Margin="6,0,0,0" VerticalAlignment="Center"/>
+                <TextBlock Text="Built in" Margin="8,0,0,0" VerticalAlignment="Center"
+                    Opacity="0.7"
+                    Visibility="{Binding IsBuiltIn, Converter={StaticResource BooleanToVisibilityConverter}}"/>
             </StackPanel>
         </DataTemplate>
     </ctl:TurbolandFloatingDialog.Resources>
@@ -26,7 +30,7 @@
 	customization items with enable checkboxes and a details pane; Add
 	To Prompt is a placeholder until item management. -->
     <StackPanel Margin="10,0,10,0">
-        <Label Content="Search Paths For Customization Items (user folder &amp; workspace automatic)"/>
+        <Label Content="Additional Search Paths (TurboPilot built-ins, user folder, and workspace are automatic)"/>
 
         <!-- Folder list with its side button column. -->
         <Grid Margin="0,4,0,0">

@@ -1,0 +1,212 @@
+{
+	"$schema": "https://json-schema.org/draft/2020-12/schema",
+	"title": "Phase Orchestration State",
+	"description": "The runner-owned state for one roadmap, one TurboPilot process, and one active phase.",
+	"type": "object",
+	"additionalProperties": false,
+	"required": [
+		"schemaVersion",
+		"roadmapId",
+		"manifestPath",
+		"executablePath",
+		"runDirectory",
+		"controlPath",
+		"mode",
+		"processId",
+		"activePhaseId",
+		"activeLaunchId",
+		"activeRequestPath",
+		"activeSessionStatusPath",
+		"activeResultPath",
+		"phaseState",
+		"completedPhases",
+		"progress",
+		"pendingReplacement",
+		"closeCommandId",
+		"createdAt",
+		"updatedAt"
+	],
+	"properties": {
+		"schemaVersion": {
+			"const": "1.0"
+		},
+		"roadmapId": {
+			"type": "string",
+			"minLength": 1
+		},
+		"manifestPath": {
+			"type": "string",
+			"minLength": 1
+		},
+		"executablePath": {
+			"type": "string",
+			"minLength": 1
+		},
+		"runDirectory": {
+			"type": "string",
+			"minLength": 1
+		},
+		"controlPath": {
+			"type": "string",
+			"minLength": 1
+		},
+		"mode": {
+			"type": "string",
+			"minLength": 1
+		},
+		"processId": {
+			"type": [
+				"integer",
+				"null"
+			],
+			"minimum": 1
+		},
+		"activePhaseId": {
+			"type": "string",
+			"pattern": "^[0-9]{2,}$"
+		},
+		"activeLaunchId": {
+			"type": "string"
+		},
+		"activeRequestPath": {
+			"type": "string"
+		},
+		"activeSessionStatusPath": {
+			"type": "string"
+		},
+		"activeResultPath": {
+			"type": "string"
+		},
+		"phaseState": {
+			"enum": [
+				"starting",
+				"running",
+				"completed",
+				"replacing",
+				"closing",
+				"closed",
+				"failed"
+			]
+		},
+		"completedPhases": {
+			"type": "array",
+			"uniqueItems": true,
+			"items": {
+				"type": "string",
+				"pattern": "^[0-9]{2,}$"
+			}
+		},
+		"progress": {
+			"$ref": "#/$defs/progress"
+		},
+		"pendingReplacement": {
+			"oneOf": [
+				{
+					"type": "null"
+				},
+				{
+					"$ref": "#/$defs/replacement"
+				}
+			]
+		},
+		"closeCommandId": {
+			"type": [
+				"string",
+				"null"
+			]
+		},
+		"createdAt": {
+			"type": "string",
+			"format": "date-time"
+		},
+		"updatedAt": {
+			"type": "string",
+			"format": "date-time"
+		}
+	},
+	"$defs": {
+		"progress": {
+			"type": "object",
+			"additionalProperties": false,
+			"required": [
+				"task",
+				"message",
+				"updatedAt"
+			],
+			"properties": {
+				"task": {
+					"type": [
+						"string",
+						"null"
+					]
+				},
+				"message": {
+					"type": "string",
+					"minLength": 1
+				},
+				"updatedAt": {
+					"type": "string",
+					"format": "date-time"
+				}
+			}
+		},
+		"replacement": {
+			"type": "object",
+			"additionalProperties": false,
+			"required": [
+				"commandId",
+				"targetProcessId",
+				"targetLaunchId",
+				"fromPhaseId",
+				"toPhaseId",
+				"nextLaunchId",
+				"requestPath",
+				"sessionStatusPath",
+				"resultPath",
+				"issuedAt"
+			],
+			"properties": {
+				"commandId": {
+					"type": "string",
+					"minLength": 1
+				},
+				"targetProcessId": {
+					"type": "integer",
+					"minimum": 1
+				},
+				"targetLaunchId": {
+					"type": "string",
+					"minLength": 1
+				},
+				"fromPhaseId": {
+					"type": "string",
+					"pattern": "^[0-9]{2,}$"
+				},
+				"toPhaseId": {
+					"type": "string",
+					"pattern": "^[0-9]{2,}$"
+				},
+				"nextLaunchId": {
+					"type": "string",
+					"minLength": 1
+				},
+				"requestPath": {
+					"type": "string",
+					"minLength": 1
+				},
+				"sessionStatusPath": {
+					"type": "string",
+					"minLength": 1
+				},
+				"resultPath": {
+					"type": "string",
+					"minLength": 1
+				},
+				"issuedAt": {
+					"type": "string",
+					"format": "date-time"
+				}
+			}
+		}
+	}
+}

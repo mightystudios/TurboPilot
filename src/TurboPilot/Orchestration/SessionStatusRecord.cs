@@ -44,4 +44,7 @@ internal sealed record SessionStatusRecord
 	public bool IsWorking { get; init; }
 	public bool HasPendingQuestion { get; init; }
 	public string? Error { get; init; }
+	public string? LastControlCommandId { get; init; }
+	public string? LastControlCommandState { get; init; }
+	public string? LastControlCommandError { get; init; }
 }

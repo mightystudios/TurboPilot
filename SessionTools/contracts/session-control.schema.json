@@ -1,0 +1,73 @@
+{
+	"$schema": "https://json-schema.org/draft/2020-12/schema",
+	"title": "TurboPilot Session Control Command",
+	"description": "Native TurboPilot 1.0 single-slot control mailbox for replacing or closing a managed session.",
+	"type": "object",
+	"additionalProperties": false,
+	"required": [
+		"contractVersion",
+		"commandId",
+		"targetProcessId",
+		"targetLaunchId",
+		"action",
+		"disposition"
+	],
+	"properties": {
+		"contractVersion": {
+			"const": "1.0"
+		},
+		"commandId": {
+			"type": "string",
+			"minLength": 1,
+			"maxLength": 200
+		},
+		"targetProcessId": {
+			"type": "integer",
+			"minimum": 1
+		},
+		"targetLaunchId": {
+			"type": "string",
+			"minLength": 1,
+			"maxLength": 200
+		},
+		"action": {
+			"enum": [
+				"replace",
+				"close"
+			]
+		},
+		"disposition": {
+			"enum": [
+				"abandon",
+				"summarize_and_store"
+			]
+		},
+		"launchRequestPath": {
+			"type": "string",
+			"minLength": 1
+		}
+	},
+	"allOf": [
+		{
+			"if": {
+				"properties": {
+					"action": {
+						"const": "replace"
+					}
+				}
+			},
+			"then": {
+				"required": [
+					"launchRequestPath"
+				]
+			},
+			"else": {
+				"not": {
+					"required": [
+						"launchRequestPath"
+					]
+				}
+			}
+		}
+	]
+}

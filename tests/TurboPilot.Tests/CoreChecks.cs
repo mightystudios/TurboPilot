@@ -21,6 +21,7 @@ internal static class CoreChecks
 	public static async Task RunAsync()
 	{
 		CheckConfiguration();
+		CheckBundledCustomizationDiscovery();
 		CheckCustomizationDiscovery();
 		CheckApplicationInstructions();
 		CheckExternalTools();
@@ -41,6 +42,78 @@ internal static class CoreChecks
 		await CheckToolRowsAsync();
 		CheckHistoryAndStatus();
 		Console.WriteLine("PASS configuration, history storage, questions, streaming events, tool rows, usage, prompt navigation, and external tools");
+	}
+
+	private static void CheckBundledCustomizationDiscovery()
+	{
+		using var workspace = new TestWorkspace();
+		string firstBundle = Path.Combine(workspace.Root, "bundle-one");
+		string secondBundle = Path.Combine(workspace.Root, "bundle-two");
+		string personal = Path.Combine(workspace.Root, "personal");
+		Directory.CreateDirectory(Path.Combine(firstBundle, "agents"));
+		Directory.CreateDirectory(Path.Combine(secondBundle, "agents"));
+		Directory.CreateDirectory(Path.Combine(personal, "agents"));
+		File.WriteAllText(
+			Path.Combine(firstBundle, "agents", "phase-executor.agent.md"),
+			"# Built-in executor one");
+		File.WriteAllText(
+			Path.Combine(secondBundle, "agents", "phase-executor.agent.md"),
+			"# Built-in executor two");
+		File.WriteAllText(
+			Path.Combine(personal, "agents", "phase-executor.agent.md"),
+			"# Personal executor");
+
+		string? originalHome = Environment.GetEnvironmentVariable("COPILOT_HOME");
+		string? originalTools = Environment.GetEnvironmentVariable(
+			CustomizationService.SessionToolsEnvironmentVariable);
+		string? originalExecutable = Environment.GetEnvironmentVariable(
+			CustomizationService.ExecutableEnvironmentVariable);
+		try
+		{
+			Environment.SetEnvironmentVariable("COPILOT_HOME", personal);
+			CustomizationService.BundledRootOverride = firstBundle;
+			CustomizationService.ConfigureProcessEnvironment();
+
+			var first = CustomizationService.Preview(null, [], new CustomizationLibrary());
+			var builtIn = first.Agents.Values.Single(item => item.IsBuiltIn);
+			var personalCollision = first.Agents.Values.Single(item => !item.IsBuiltIn);
+			Check.Equal("phase-executor.agent", builtIn.Name,
+				"The bundled agent keeps the reserved external-launch mode name");
+			Check.Equal("phase-executor.agent_2", personalCollision.Name,
+				"A colliding personal agent receives the suffix");
+			Check.True(
+				builtIn.Identity == "turbopilot-session-tools/agents/phase-executor.agent.md",
+				"Use a stable source-relative identity for bundled customizations.");
+			Check.Equal(Path.GetFullPath(firstBundle),
+				Environment.GetEnvironmentVariable(
+					CustomizationService.SessionToolsEnvironmentVariable),
+				"Expose the application-owned tools root to child sessions");
+			Check.Equal(Path.GetFullPath(Environment.ProcessPath!),
+				Environment.GetEnvironmentVariable(
+					CustomizationService.ExecutableEnvironmentVariable),
+				"Expose the running executable to child sessions");
+			Check.Equal(Path.GetFullPath(firstBundle),
+				CustomizationService.GetSearchRoots(null, []).First(),
+				"Search the bundled source before personal customizations");
+
+			builtIn.Enabled = false;
+			CustomizationService.BundledRootOverride = secondBundle;
+			var second = CustomizationService.Preview(null, [], first);
+			var moved = second.Agents.Values.Single(item => item.IsBuiltIn);
+			Check.True(!moved.Enabled
+				&& moved.Identity == builtIn.Identity
+				&& !string.Equals(moved.FilePath, builtIn.FilePath, StringComparison.OrdinalIgnoreCase),
+				"Carry bundled enabled state across installation-directory changes.");
+		}
+		finally
+		{
+			CustomizationService.BundledRootOverride = null;
+			Environment.SetEnvironmentVariable("COPILOT_HOME", originalHome);
+			Environment.SetEnvironmentVariable(
+				CustomizationService.SessionToolsEnvironmentVariable, originalTools);
+			Environment.SetEnvironmentVariable(
+				CustomizationService.ExecutableEnvironmentVariable, originalExecutable);
+		}
 	}
 
 	private static void CheckExternalLinks()
@@ -213,8 +286,11 @@ internal static class CoreChecks
 				"Distinguish Copilot CLI's standard files from TurboPilot-only search roots.");
 			Check.True(!library.Instructions.Keys.Any(path => path.EndsWith("ignored.md", StringComparison.OrdinalIgnoreCase)),
 				"Do not treat arbitrary Markdown in a custom instruction directory as instructions.");
-			Check.Equal(copilotHome,
-				CustomizationService.GetSearchRoots(currentDirectory, [additional]).First(),
+			var roots = CustomizationService.GetSearchRoots(
+				currentDirectory, [additional]).ToList();
+			Check.Equal(CustomizationService.BundledRoot, roots[0],
+				"Search the application-owned bundle first");
+			Check.Equal(copilotHome, roots[1],
 				"COPILOT_HOME replaces the default personal customization root.");
 
 			var config = new SessionConfig();

@@ -709,19 +709,30 @@ internal static class UiChecks
 			Mode = "Standard",
 			SessionStatusPath = Path.Combine(
 				workspace.Workspace, ".ai", "session-runs", "ui", "session-status.json"),
+			SessionControlPath = Path.Combine(
+				workspace.Workspace, ".ai", "session-runs", "ui", "session-control.json"),
 		};
 		var launch = new ValidatedSessionLaunchRequest(request, library);
 		var window = new MainWindow(
 			workspace.Store,
 			workspace.CreateChat,
 			_ => library,
-			Path.Combine(workspace.Root, "launch-browser"));
+			Path.Combine(workspace.Root, "launch-browser"),
+			resolveSessionOptions: (workspacePath, mode, customizations, _) =>
+				Task.FromResult(options with
+				{
+					WorkspaceFolder = workspacePath,
+					Mode = mode,
+					Customizations = customizations,
+				}));
 		TurbolandTheme.Wpf.TurbolandTheme.ApplyTo(window);
 		var status = new SessionStatusController(
 			request, window.RequestLaunchAttention);
 		var before = provider.Requests.Count;
 		var held = new LocalProvider.Reply("UI external launch reply.", Hold: true);
 		provider.Replies.Enqueue(held);
+		var closed = false;
+		window.Closed += (_, _) => closed = true;
 		try
 		{
 			window.Show();
@@ -746,17 +757,125 @@ internal static class UiChecks
 			await Check.UntilAsync(
 				() => ReadLaunchStatus(request.SessionStatusPath).State == SessionStatusStates.Idle,
 				"The external launch window did not report idle after its automatic turn.");
-			Console.WriteLine("PASS WPF external launch starts one fresh session and submits one attached prompt");
+
+			var initialSessionId = Field<ChatService>(window, "_chat").SessionId;
+			WriteSessionControl(
+				request.SessionControlPath,
+				new SessionControlCommand
+				{
+					ContractVersion = SessionControlCommand.CurrentContractVersion,
+					CommandId = "ui-stale",
+					TargetProcessId = Environment.ProcessId,
+					TargetLaunchId = "different-launch",
+					Action = SessionControlActions.Close,
+					Disposition = SessionControlDispositions.Abandon,
+				});
+			await Check.UntilAsync(
+				() => ReadLaunchStatus(request.SessionStatusPath).LastControlCommandId == "ui-stale",
+				"The stale command was not acknowledged.");
+			var stale = ReadLaunchStatus(request.SessionStatusPath);
+			Check.True(stale.State == SessionStatusStates.Idle
+				&& stale.LastControlCommandState == SessionControlCommandStates.Failed
+				&& window.IsVisible
+				&& Field<ChatService>(window, "_chat").SessionId == initialSessionId,
+				"A stale command must not replace or close the active session.");
+
+			var replacement = request with
+			{
+				LaunchId = "ui-replacement",
+				SessionLabel = "UI replacement launch",
+				Attachments = [],
+				InitialPrompt = "Continue in a fresh remotely controlled session.",
+				SessionStatusPath = Path.Combine(
+					workspace.Workspace, ".ai", "session-runs", "ui-replacement", "session-status.json"),
+			};
+			var replacementPath = workspace.Write(
+				"requests\\ui-replacement.json",
+				JsonSerializer.Serialize(replacement, SessionLaunchRequest.JsonOptions));
+			var replacementReply = new LocalProvider.Reply("UI replacement reply.", Hold: true);
+			provider.Replies.Enqueue(replacementReply);
+			WriteSessionControl(
+				request.SessionControlPath,
+				new SessionControlCommand
+				{
+					ContractVersion = SessionControlCommand.CurrentContractVersion,
+					CommandId = "ui-replace",
+					TargetProcessId = Environment.ProcessId,
+					TargetLaunchId = request.LaunchId,
+					Action = SessionControlActions.Replace,
+					Disposition = SessionControlDispositions.Abandon,
+					LaunchRequestPath = replacementPath,
+				});
+
+			await replacementReply.Started.Task.WaitAsync(TimeSpan.FromSeconds(45));
+			await Check.UntilAsync(
+				() => File.Exists(replacement.SessionStatusPath)
+					&& ReadLaunchStatus(replacement.SessionStatusPath).State == SessionStatusStates.Running,
+				"The controlled replacement session did not report its automatic turn.",
+				timeoutSeconds: 45);
+			Check.True(window.IsVisible
+				&& window.IsSessionActive
+				&& Field<ChatService>(window, "_chat").SessionId != initialSessionId,
+				"Replace the session in the same visible TurboPilot window with a fresh context.");
+			Check.Equal(before + 2, provider.Requests.Count,
+				"The replacement command must submit exactly one new initial prompt");
+			var replacementSent = provider.Requests.Last().GetRawText();
+			Check.True(replacementSent.Contains(replacement.InitialPrompt, StringComparison.Ordinal)
+				&& !replacementSent.Contains(workOrder.Replace("\\", "\\\\"), StringComparison.Ordinal),
+				"The replacement session must receive its own prompt without the previous attachment.");
+			var initialFinal = ReadLaunchStatus(request.SessionStatusPath);
+			Check.True(initialFinal.State == SessionStatusStates.Closed
+				&& initialFinal.LastControlCommandId == "ui-replace"
+				&& initialFinal.LastControlCommandState == SessionControlCommandStates.Completed,
+				"The replaced launch must acknowledge the command and close its health record.");
+
+			replacementReply.Release.TrySetResult();
+			await Check.UntilAsync(
+				() => ReadLaunchStatus(replacement.SessionStatusPath).State == SessionStatusStates.Idle,
+				"The replacement session did not become idle.");
+			WriteSessionControl(
+				request.SessionControlPath,
+				new SessionControlCommand
+				{
+					ContractVersion = SessionControlCommand.CurrentContractVersion,
+					CommandId = "ui-close",
+					TargetProcessId = Environment.ProcessId,
+					TargetLaunchId = replacement.LaunchId,
+					Action = SessionControlActions.Close,
+					Disposition = SessionControlDispositions.Abandon,
+				});
+			await Check.UntilAsync(
+				() => closed,
+				"The controlled close command did not close the TurboPilot window.",
+				timeoutSeconds: 45);
+			var replacementFinal = ReadLaunchStatus(replacement.SessionStatusPath);
+			Check.True(replacementFinal.State == SessionStatusStates.Closed
+				&& replacementFinal.LastControlCommandId == "ui-close"
+				&& replacementFinal.LastControlCommandState == SessionControlCommandStates.Completed,
+				"The closed launch must acknowledge the command in its final health record.");
+			Console.WriteLine("PASS WPF external launch, remote replacement, and remote close");
 		}
 		finally
 		{
 			held.Release.TrySetResult();
-			await window.EndSessionAsync(SessionDisposition.Abandon);
-			status.Closing();
-			SetField(window, "_closing", true);
-			SetField(window, "_closeApproved", true);
-			window.Close();
+			if (!closed)
+			{
+				await window.EndSessionAsync(SessionDisposition.Abandon);
+				SetField(window, "_closing", true);
+				SetField(window, "_closeApproved", true);
+				window.Close();
+			}
 		}
+	}
+
+	private static void WriteSessionControl(string path, SessionControlCommand command)
+	{
+		Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+		var temporaryPath = path + ".tmp";
+		File.WriteAllText(
+			temporaryPath,
+			JsonSerializer.Serialize(command, SessionLaunchRequest.JsonOptions));
+		File.Move(temporaryPath, path, overwrite: true);
 	}
 
 	private static SessionStatusRecord ReadLaunchStatus(string path) =>

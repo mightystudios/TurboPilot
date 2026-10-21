@@ -36,12 +36,30 @@ internal sealed class SessionStatusWriter
 		bool isWorking = false,
 		bool hasPendingQuestion = false,
 		DateTimeOffset? lastActivityAt = null,
-		string? error = null)
+		string? error = null,
+		string? lastControlCommandId = null,
+		string? lastControlCommandState = null,
+		string? lastControlCommandError = null)
 	{
 		if (!SessionStatusStates.IsValid(state))
 			throw new ArgumentOutOfRangeException(nameof(state), state, "Unknown session status state.");
 		if (state == SessionStatusStates.Failed && string.IsNullOrWhiteSpace(error))
 			throw new ArgumentException("A failed session status requires an actionable error.", nameof(error));
+		if (lastControlCommandState is not null
+			&& !SessionControlCommandStates.IsValid(lastControlCommandState))
+		{
+			throw new ArgumentOutOfRangeException(
+				nameof(lastControlCommandState),
+				lastControlCommandState,
+				"Unknown session control command state.");
+		}
+		if (lastControlCommandState == SessionControlCommandStates.Failed
+			&& string.IsNullOrWhiteSpace(lastControlCommandError))
+		{
+			throw new ArgumentException(
+				"A failed session control command requires an actionable error.",
+				nameof(lastControlCommandError));
+		}
 
 		lock (_sync)
 		{
@@ -61,6 +79,14 @@ internal sealed class SessionStatusWriter
 				IsWorking = isWorking,
 				HasPendingQuestion = hasPendingQuestion,
 				Error = state == SessionStatusStates.Failed ? error!.Trim() : null,
+				LastControlCommandId = string.IsNullOrWhiteSpace(lastControlCommandId)
+					? null
+					: lastControlCommandId.Trim(),
+				LastControlCommandState = lastControlCommandState,
+				LastControlCommandError =
+					lastControlCommandState == SessionControlCommandStates.Failed
+						? lastControlCommandError!.Trim()
+						: null,
 			};
 			AtomicFile.Write(_request.SessionStatusPath, stream =>
 				JsonSerializer.Serialize(stream, record, JsonOptions));

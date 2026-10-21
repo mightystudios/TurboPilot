@@ -1,0 +1,23 @@
+{
+	"schemaVersion": "1.0",
+	"roadmapId": "{{ROADMAP_ID}}",
+	"phaseId": "{{PHASE_ID}}",
+	"summary": "{{PLAIN_LANGUAGE_COMPLETION_SUMMARY}}",
+	"acceptanceCriteria": [
+		{
+			"id": "{{ACCEPTANCE_ID}}",
+			"passed": true,
+			"evidence": "{{OBSERVED_EVIDENCE}}"
+		}
+	],
+	"validation": [
+		{
+			"command": "{{EXACT_COMMAND}}",
+			"passed": true,
+			"evidence": "{{RELEVANT_PASSING_OUTPUT}}"
+		}
+	],
+	"filesChanged": [
+		"{{RELATIVE_FILE_PATH}}"
+	]
+}

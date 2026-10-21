@@ -13,6 +13,7 @@ It answers the question: _"What if LLMs existed in 1992?"_
 - .NET 9 SDK or later
 - WebView2 Runtime for Rendered output
 - An authenticated Copilot CLI profile for cloud sessions, or an OpenAI-compatible endpoint for BYOK sessions
+- Python 3.10 or later when using the bundled phase-planning workflow
 
 ## Build and run
 
@@ -68,6 +69,25 @@ TurboPilot also appends the user-editable file below to new and resumed sessions
 
 If the file does not exist, it is created from the bundled defaults. The defaults ask for Markdown responses, links, images, and Mermaid diagrams. Edit or empty the file to change those presentation instructions.
 
+## Bundled phase planning and execution
+
+Published builds include `SessionTools` beside `TurboPilot.exe`. TurboPilot
+discovers this application-owned source before personal, additional, and
+workspace customizations. It provides three stable agent modes:
+
+- `phase-planner.agent` drafts a master roadmap and sequential phase plans.
+- `phase-orchestrator.agent` manages one TurboPilot process for the roadmap.
+- `phase-executor.agent` completes exactly one phase before its session is replaced.
+
+The built-in source is not added to the user's customization-folder list and
+cannot be removed there. Individual bundled items remain visible as **Built in**
+and can be disabled. User customizations with the same name receive a suffix,
+so the bundled phase mode names remain stable.
+
+Child sessions receive `TURBOPILOT_SESSION_TOOLS` and
+`TURBOPILOT_EXECUTABLE`, allowing agents to run the installed Python tools
+without depending on a source checkout or the current workspace.
+
 ## Session management
 
 - **Compact Context** summarizes the conversation without changing the visible transcript.
@@ -89,13 +109,13 @@ Transcripts, rendered transcripts, and session metadata are saved separately. Pr
 
 ## External session launch and monitoring
 
-Published builds include `session-launch-capabilities.json` beside `TurboPilot.exe`. Any local tool can check this file before launching TurboPilot, start a fresh configured session, submit its first prompt, and monitor its health without automating the UI:
+Published builds include `session-launch-capabilities.json` beside `TurboPilot.exe`. Any local tool can check this file before launching TurboPilot, start a fresh configured session, submit its first prompt, monitor its health, and optionally replace or close the live session without automating the UI:
 
 ```powershell
 .\TurboPilot.exe --launch-request 'D:\absolute\path\launch-request.json'
 ```
 
-Launching `TurboPilot.exe` without arguments keeps the normal interactive startup. Every other argument shape is rejected with a nonzero exit code. The launch request path, workspace, and session-status path must be absolute. The workspace must exist, the status path must end in `.json`, and each optional attachment must be an absolute existing file contained by the workspace.
+Launching `TurboPilot.exe` without arguments keeps the normal interactive startup. Every other argument shape is rejected with a nonzero exit code. The launch request path, workspace, session-status path, and optional session-control path must be absolute. The workspace must exist, JSON sidecar paths must end in `.json`, and each optional attachment must be an absolute existing file contained by the workspace.
 
 The version `1.0` launch request is:
 
@@ -111,11 +131,12 @@ The version `1.0` launch request is:
   ],
   "initialPrompt": "Complete the attached work order and report any blockers.",
   "mode": "Autopilot",
-  "sessionStatusPath": "D:\\dev\\projects\\ExampleApp\\.ai\\session-runs\\nightly-refactor-20261019\\session-status.json"
+  "sessionStatusPath": "D:\\dev\\projects\\ExampleApp\\.ai\\session-runs\\nightly-refactor-20261019\\session-status.json",
+  "sessionControlPath": "D:\\dev\\projects\\ExampleApp\\.ai\\session-runs\\turbopilot-control.json"
 }
 ```
 
-`launchId` is a caller-defined correlation identifier copied into every status record. `attachments` is optional and may be empty. TurboPilot rescans customizations for the requested workspace before resolving `mode`. Built-in modes are `Standard`, `Plan`, and `Autopilot`; a custom mode must name an enabled custom agent. Provider, model, reasoning effort, API credentials, instruction loading, skill preloading, and Rendered file linking come from settings already saved in TurboPilot. The initial prompt is not added to application settings. After the fresh session connects, TurboPilot sends that prompt once with all requested attachments.
+`launchId` is a caller-defined correlation identifier copied into every status record. `attachments` and `sessionControlPath` are optional. Omitting `sessionControlPath` leaves the instance monitor-only and preserves the original launch behavior. TurboPilot rescans customizations for the requested workspace before resolving `mode`. Built-in modes are `Standard`, `Plan`, and `Autopilot`; a custom mode must name an enabled custom agent. Provider, model, reasoning effort, API credentials, instruction loading, skill preloading, and Rendered file linking come from settings already saved in TurboPilot. The initial prompt is not added to application settings. After the fresh session connects, TurboPilot sends that prompt once with all requested attachments.
 
 TurboPilot atomically owns and updates the requested status file. Its version `1.0` schema is:
 
@@ -133,7 +154,10 @@ TurboPilot atomically owns and updates the requested status file. Its version `1
   "lastActivityAt": "2026-10-20T01:00:14+00:00",
   "isWorking": true,
   "hasPendingQuestion": false,
-  "error": null
+  "error": null,
+  "lastControlCommandId": null,
+  "lastControlCommandState": null,
+  "lastControlCommandError": null
 }
 ```
 
@@ -150,7 +174,34 @@ TurboPilot atomically owns and updates the requested status file. Its version `1
 
 While a turn remains `running`, `updatedAt` advances at least every 15 seconds. The heartbeat stops while idle or waiting for the user. The first `waiting_user` transition brings the TurboPilot window to the user's attention. Status files never contain provider credentials, permission grants, prompts, responses, or transcript content.
 
-The external tool owns completion criteria, retry policy, follow-up actions, and any result files. TurboPilot does not parse prompts, attachments, or transcripts to make external workflow decisions, and `idle` means only that the chat session is idle. Each process must receive its own request and status paths. Normal window close keeps the existing confirmation and session-history choice, writes `closing`, and then writes `closed`; forcibly terminating the process can leave the last health record in place, so monitoring tools should also watch `processId`.
+### Remote session control
+
+When `sessionControlPath` is present, the external tool may atomically create or replace that JSON file with a version `1.0` command. Every command targets both the current `processId` and `launchId`, preventing a stale command from controlling a replacement process or session:
+
+```json
+{
+  "contractVersion": "1.0",
+  "commandId": "advance-to-next-work-item",
+  "targetProcessId": 12345,
+  "targetLaunchId": "nightly-refactor-20261019",
+  "action": "replace",
+  "disposition": "abandon",
+  "launchRequestPath": "D:\\dev\\projects\\ExampleApp\\.ai\\session-runs\\next-work-item\\launch-request.json"
+}
+```
+
+| Action | Behavior |
+| --- | --- |
+| `replace` | Validate the referenced launch request, end the current session, start a fresh context in the same window, and submit the replacement request's initial prompt |
+| `close` | End the current session and close the TurboPilot window without interactive confirmation |
+
+`disposition` must be `abandon` or `summarize_and_store`. `abandon` skips another model call and removes the ended session from Past Sessions. `summarize_and_store` asks the current model for its archive label before retaining the session. A `replace` command requires `launchRequestPath`; a `close` command must omit it.
+
+The replacement request must use a new `launchId` and `sessionStatusPath` while retaining the same `sessionControlPath`. TurboPilot resolves and validates the replacement request before ending the live session. The old status file ends in `closed`; the new request owns a new status file and receives its prompt in a fresh SDK context.
+
+`lastControlCommandState` is `received`, `completed`, or `failed`. A rejected command leaves the current session running and records an actionable `lastControlCommandError`. External tools should use a unique `commandId`, write commands atomically, and wait for the matching acknowledgement before issuing another command.
+
+The external tool owns completion criteria, retry policy, follow-up actions, and any result files. TurboPilot does not parse prompts, attachments, or transcripts to make external workflow decisions, and `idle` means only that the chat session is idle. Each process must receive its own request and status paths. Write access to `sessionControlPath` grants control of that TurboPilot process, so place it in a caller-owned directory with appropriate filesystem permissions. Normal user-initiated window close keeps the existing confirmation and session-history choice. A valid `close` command is already explicit authorization and therefore bypasses those dialogs. Forcibly terminating the process can leave the last health record in place, so monitoring tools should also watch `processId`.
 
 
 ## Regression checks

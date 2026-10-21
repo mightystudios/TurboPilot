@@ -4,7 +4,8 @@ namespace TurboPilot.Customizations;
 
 /// <summary>
 /// The collected customization items, one map per type, keyed by the full
-/// file path of the item (case-insensitive, since this is Windows).
+/// file path of the item (case-insensitive, since this is Windows). Each
+/// item also carries a stable identity for option transfer.
 /// </summary>
 public sealed class CustomizationLibrary
 {

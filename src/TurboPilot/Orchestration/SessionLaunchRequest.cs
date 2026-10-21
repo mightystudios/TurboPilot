@@ -17,6 +17,7 @@ internal sealed record SessionLaunchRequest
 	public string InitialPrompt { get; init; } = "";
 	public string Mode { get; init; } = "";
 	public string SessionStatusPath { get; init; } = "";
+	public string SessionControlPath { get; init; } = "";
 
 	internal static JsonSerializerOptions JsonOptions { get; } = new()
 	{

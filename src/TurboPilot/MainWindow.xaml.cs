@@ -69,6 +69,8 @@ public partial class MainWindow : TurbolandWindow
 	private readonly SessionStore _sessionStore;
 	private readonly Func<ChatService> _createChat;
 	private readonly Func<string?, CustomizationLibrary> _collectCustomizations;
+	private readonly Func<string, string, CustomizationLibrary, CancellationToken, Task<ChatSessionOptions>>
+		_resolveSessionOptions;
 	private readonly string _webViewDataFolder;
 	private readonly Action<ProcessStartInfo> _launchExternal;
 
@@ -87,6 +89,8 @@ public partial class MainWindow : TurbolandWindow
 	private bool _closeApproved;
 	private string? _lastSessionFailure;
 	private SessionStatusController? _launchStatus;
+	private ValidatedSessionLaunchRequest? _externalLaunch;
+	private SessionControlMonitor? _sessionControl;
 
 	// Model and session id of the live session. The badge shows the model
 	// over the workspace folder; the id identifies the session elsewhere.
@@ -111,11 +115,20 @@ public partial class MainWindow : TurbolandWindow
 
 	internal MainWindow(SessionStore sessionStore, Func<ChatService>? createChat = null,
 		Func<string?, CustomizationLibrary>? collectCustomizations = null, string? webViewDataFolder = null,
-		string? scriptsPath = null, Action<ProcessStartInfo>? launchExternal = null)
+		string? scriptsPath = null, Action<ProcessStartInfo>? launchExternal = null,
+		Func<string, string, CustomizationLibrary, CancellationToken, Task<ChatSessionOptions>>?
+			resolveSessionOptions = null)
 	{
 		_sessionStore = sessionStore;
 		_createChat = createChat ?? (() => new ChatService(_sessionStore));
 		_collectCustomizations = collectCustomizations ?? CustomizationService.Rescan;
+		_resolveSessionOptions = resolveSessionOptions
+			?? ((workspace, mode, customizations, cancellationToken) =>
+				SessionOptionsFactory.ResolveSavedAsync(
+					workspace,
+					mode,
+					customizations,
+					cancellationToken: cancellationToken));
 		_scriptsPath = scriptsPath;
 		_launchExternal = launchExternal ?? (startInfo => Process.Start(startInfo)?.Dispose());
 		_webViewDataFolder = webViewDataFolder ?? System.IO.Path.Combine(
@@ -1268,17 +1281,33 @@ public partial class MainWindow : TurbolandWindow
 			throw new InvalidOperationException("This window already owns an external session launch.");
 
 		_launchStatus = status;
+		_externalLaunch = launch;
+		var started = await StartExternalSessionAsync(
+			launch,
+			status,
+			SessionDisposition.Abandon,
+			resolvedOptions);
+		StartSessionControlMonitor();
+		return started;
+	}
+
+	private async Task<bool> StartExternalSessionAsync(
+		ValidatedSessionLaunchRequest launch,
+		SessionStatusController status,
+		SessionDisposition disposition,
+		ChatSessionOptions? resolvedOptions = null)
+	{
 		using var cancellation = new CancellationTokenSource();
 		_restartCancellation = cancellation;
 		_sessionChanging = true;
 		SetSessionActive(IsSessionActive);
 		try
 		{
-			var options = resolvedOptions ?? await SessionOptionsFactory.ResolveSavedAsync(
+			var options = resolvedOptions ?? await _resolveSessionOptions(
 				launch.Request.Workspace,
 				launch.Request.Mode,
 				launch.Customizations,
-				cancellationToken: cancellation.Token);
+				cancellation.Token);
 			cancellation.Token.ThrowIfCancellationRequested();
 
 			status.Connecting();
@@ -1287,7 +1316,7 @@ public partial class MainWindow : TurbolandWindow
 				options,
 				null,
 				null,
-				SessionDisposition.Abandon,
+				disposition,
 				launch.Customizations))
 			{
 				status.Failed(_lastSessionFailure ?? "The session could not be started.");
@@ -1326,6 +1355,183 @@ public partial class MainWindow : TurbolandWindow
 			_sendingInput = false;
 			RefreshChatState();
 		}
+	}
+
+	private void StartSessionControlMonitor()
+	{
+		var controlPath = _externalLaunch?.Request.SessionControlPath;
+		if (string.IsNullOrWhiteSpace(controlPath))
+			return;
+		if (_sessionControl is not null)
+			throw new InvalidOperationException("This window already monitors a session control path.");
+
+		_sessionControl = new SessionControlMonitor(
+			controlPath,
+			DispatchSessionControlCommandAsync,
+			DispatchSessionControlFailureAsync);
+		_sessionControl.Start();
+	}
+
+	private Task DispatchSessionControlCommandAsync(SessionControlCommand command)
+	{
+		if (Dispatcher.HasShutdownStarted)
+			return Task.CompletedTask;
+		return Dispatcher.InvokeAsync(() => ExecuteSessionControlCommandAsync(command)).Task.Unwrap();
+	}
+
+	private Task DispatchSessionControlFailureAsync(SessionControlCommandException exception)
+	{
+		if (Dispatcher.HasShutdownStarted)
+			return Task.CompletedTask;
+		return Dispatcher.InvokeAsync(() =>
+		{
+			_launchStatus?.ControlFailed(exception.CommandId, exception.Message);
+		}).Task;
+	}
+
+	private async Task ExecuteSessionControlCommandAsync(SessionControlCommand command)
+	{
+		var launch = _externalLaunch;
+		var status = _launchStatus;
+		if (launch is null || status is null)
+			return;
+		if (command.TargetProcessId != Environment.ProcessId)
+		{
+			status.ControlFailed(
+				command.CommandId,
+				$"The command targets process {command.TargetProcessId}, not this process ({Environment.ProcessId}).");
+			return;
+		}
+		if (!string.Equals(
+			command.TargetLaunchId,
+			launch.Request.LaunchId,
+			StringComparison.Ordinal))
+		{
+			status.ControlFailed(
+				command.CommandId,
+				$"The command targets launch '{command.TargetLaunchId}', not '{launch.Request.LaunchId}'.");
+			return;
+		}
+		if (_closing || _closeApproved)
+		{
+			status.ControlFailed(command.CommandId, "The TurboPilot window is already closing.");
+			return;
+		}
+
+		status.ControlReceived(command.CommandId);
+		try
+		{
+			if (command.Action == SessionControlActions.Close)
+				await CloseFromSessionControlAsync(command, status);
+			else
+				await ReplaceFromSessionControlAsync(command, launch, status);
+		}
+		catch (Exception ex)
+		{
+			status.ControlFailed(command.CommandId, ex.Message);
+			AppendOutput($"\r\n[error] External session control failed: {ex.Message}\r\n\r\n");
+		}
+	}
+
+	private async Task CloseFromSessionControlAsync(
+		SessionControlCommand command,
+		SessionStatusController status)
+	{
+		status.Closing();
+		_closing = true;
+		try
+		{
+			if (!await EndSessionAsync(command.SessionDisposition))
+				throw new InvalidOperationException("The active session did not close.");
+			status.ControlCompleted(command.CommandId);
+			_closeApproved = true;
+			Close();
+		}
+		catch
+		{
+			_closing = false;
+			status.CancelClosing();
+			RefreshChatState();
+			throw;
+		}
+	}
+
+	private async Task ReplaceFromSessionControlAsync(
+		SessionControlCommand command,
+		ValidatedSessionLaunchRequest currentLaunch,
+		SessionStatusController currentStatus)
+	{
+		var next = SessionLaunchRequestLoader.Load(
+			command.LaunchRequestPath!,
+			_collectCustomizations);
+		if (!string.Equals(
+			currentLaunch.Request.SessionControlPath,
+			next.Request.SessionControlPath,
+			StringComparison.OrdinalIgnoreCase))
+		{
+			throw new SessionControlCommandException(
+				"The replacement launch request must keep the current sessionControlPath.",
+				command.CommandId);
+		}
+		if (string.Equals(
+			currentLaunch.Request.LaunchId,
+			next.Request.LaunchId,
+			StringComparison.Ordinal))
+		{
+			throw new SessionControlCommandException(
+				"The replacement launch request must use a new launchId.",
+				command.CommandId);
+		}
+		if (string.Equals(
+			currentLaunch.Request.SessionStatusPath,
+			next.Request.SessionStatusPath,
+			StringComparison.OrdinalIgnoreCase))
+		{
+			throw new SessionControlCommandException(
+				"The replacement launch request must use a new sessionStatusPath.",
+				command.CommandId);
+		}
+
+		ChatSessionOptions options;
+		using (var cancellation = new CancellationTokenSource())
+		{
+			_restartCancellation = cancellation;
+			try
+			{
+				options = await _resolveSessionOptions(
+					next.Request.Workspace,
+					next.Request.Mode,
+					next.Customizations,
+					cancellation.Token);
+			}
+			finally
+			{
+				if (ReferenceEquals(_restartCancellation, cancellation))
+					_restartCancellation = null;
+			}
+		}
+		if (_closing || _closeApproved)
+			throw new OperationCanceledException("The TurboPilot window is closing.");
+		var nextStatus = new SessionStatusController(
+			next.Request,
+			RequestLaunchAttention);
+
+		currentStatus.Closing();
+		_launchStatus = nextStatus;
+		_externalLaunch = next;
+		var started = await StartExternalSessionAsync(
+			next,
+			nextStatus,
+			command.SessionDisposition,
+			options);
+		if (started)
+			currentStatus.ControlCompleted(command.CommandId);
+		else
+			currentStatus.ControlFailed(
+				command.CommandId,
+				_lastSessionFailure ?? "The replacement session could not be started.");
+		currentStatus.Closed();
+		currentStatus.Dispose();
 	}
 
 	/// <summary>
@@ -2550,6 +2756,8 @@ public partial class MainWindow : TurbolandWindow
 
 	protected override void OnClosed(EventArgs e)
 	{
+		_sessionControl?.Dispose();
+		_sessionControl = null;
 		_launchStatus?.Closed();
 		_launchStatus?.Dispose();
 		_attachments.Clear();

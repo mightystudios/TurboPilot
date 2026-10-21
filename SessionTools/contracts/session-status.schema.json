@@ -1,0 +1,116 @@
+{
+	"$schema": "https://json-schema.org/draft/2020-12/schema",
+	"title": "TurboPilot Session Status",
+	"description": "Native TurboPilot 1.0 lifecycle, heartbeat, and session-control acknowledgement state.",
+	"type": "object",
+	"additionalProperties": false,
+	"required": [
+		"contractVersion",
+		"launchId",
+		"sessionLabel",
+		"processId",
+		"sessionId",
+		"workspace",
+		"state",
+		"startedAt",
+		"updatedAt",
+		"lastActivityAt",
+		"isWorking",
+		"hasPendingQuestion",
+		"error"
+	],
+	"properties": {
+		"contractVersion": {
+			"const": "1.0"
+		},
+		"launchId": {
+			"type": "string",
+			"minLength": 1
+		},
+		"sessionLabel": {
+			"type": "string",
+			"minLength": 1
+		},
+		"processId": {
+			"type": "integer",
+			"minimum": 1
+		},
+		"sessionId": {
+			"oneOf": [
+				{
+					"type": "string",
+					"minLength": 1
+				},
+				{
+					"type": "null"
+				}
+			]
+		},
+		"workspace": {
+			"type": "string",
+			"minLength": 1
+		},
+		"state": {
+			"enum": [
+				"starting",
+				"connecting",
+				"running",
+				"waiting_user",
+				"idle",
+				"failed",
+				"closing",
+				"closed"
+			]
+		},
+		"startedAt": {
+			"type": "string",
+			"format": "date-time"
+		},
+		"updatedAt": {
+			"type": "string",
+			"format": "date-time"
+		},
+		"lastActivityAt": {
+			"type": "string",
+			"format": "date-time"
+		},
+		"isWorking": {
+			"type": "boolean"
+		},
+		"hasPendingQuestion": {
+			"type": "boolean"
+		},
+		"error": {
+			"type": [
+				"string",
+				"null"
+			]
+		},
+		"lastControlCommandId": {
+			"type": [
+				"string",
+				"null"
+			]
+		},
+		"lastControlCommandState": {
+			"oneOf": [
+				{
+					"enum": [
+						"received",
+						"completed",
+						"failed"
+					]
+				},
+				{
+					"type": "null"
+				}
+			]
+		},
+		"lastControlCommandError": {
+			"type": [
+				"string",
+				"null"
+			]
+		}
+	}
+}

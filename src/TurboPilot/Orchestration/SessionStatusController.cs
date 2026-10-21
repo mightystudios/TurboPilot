@@ -22,6 +22,10 @@ internal sealed class SessionStatusController : IDisposable
 	private bool _failed;
 	private bool _closed;
 	private bool _attentionRequested;
+	private string? _failureMessage;
+	private string? _lastControlCommandId;
+	private string? _lastControlCommandState;
+	private string? _lastControlCommandError;
 
 	internal SessionStatusController(
 		SessionLaunchRequest request,
@@ -79,6 +83,7 @@ internal sealed class SessionStatusController : IDisposable
 			if (_closed || _closing)
 				return;
 			_failed = true;
+			_failureMessage = error;
 			_state = SessionStatusStates.Failed;
 			WriteCurrent(chat, error);
 		}
@@ -108,7 +113,7 @@ internal sealed class SessionStatusController : IDisposable
 			if (_failed)
 			{
 				_state = SessionStatusStates.Failed;
-				WriteCurrent(chat, chat.FailureMessage ?? "The externally launched session failed.");
+				WriteCurrent(chat);
 				return;
 			}
 		}
@@ -132,6 +137,15 @@ internal sealed class SessionStatusController : IDisposable
 			Detach();
 		}
 	}
+
+	internal void ControlReceived(string commandId) =>
+		UpdateControl(commandId, SessionControlCommandStates.Received);
+
+	internal void ControlCompleted(string commandId) =>
+		UpdateControl(commandId, SessionControlCommandStates.Completed);
+
+	internal void ControlFailed(string? commandId, string error) =>
+		UpdateControl(commandId, SessionControlCommandStates.Failed, error);
 
 	private void OnChatStateChanged()
 	{
@@ -204,7 +218,28 @@ internal sealed class SessionStatusController : IDisposable
 			chat.IsWorking,
 			chat.HasPendingQuestion,
 			chat.LastActivityAt,
-			error);
+			error ?? (_state == SessionStatusStates.Failed
+				? _failureMessage ?? chat.FailureMessage ?? "The externally launched session failed."
+				: null),
+			_lastControlCommandId,
+			_lastControlCommandState,
+			_lastControlCommandError);
+	}
+
+	private void UpdateControl(string? commandId, string state, string? error = null)
+	{
+		var chat = CaptureChatStatus();
+		lock (_sync)
+		{
+			if (_closed)
+				return;
+			_lastControlCommandId = string.IsNullOrWhiteSpace(commandId) ? null : commandId.Trim();
+			_lastControlCommandState = state;
+			_lastControlCommandError = state == SessionControlCommandStates.Failed
+				? error?.Trim()
+				: null;
+			WriteCurrent(chat);
+		}
 	}
 
 	private void Detach()

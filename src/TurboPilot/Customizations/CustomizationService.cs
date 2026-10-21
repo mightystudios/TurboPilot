@@ -10,9 +10,10 @@ namespace TurboPilot.Customizations;
 /// on disk.
 ///
 /// Search roots, following the CLI convention plus our own:
-///   1. COPILOT_HOME, or %USERPROFILE%\.copilot when it is unset
-///   2. The user-defined customization folders (order not significant)
-///   3. The workspace .github folder
+///   1. TurboPilot's application-owned SessionTools bundle
+///   2. COPILOT_HOME, or %USERPROFILE%\.copilot when it is unset
+///   3. The user-defined customization folders (order not significant)
+///   4. The workspace .github folder
 ///
 /// Within each root the standard layout is scanned:
 ///   prompts/*.md, agents/*.md, skills/[name]/SKILL.md,
@@ -25,19 +26,35 @@ namespace TurboPilot.Customizations;
 /// The CLI's standard workspace agent files and the instruction files in its
 /// custom instruction directories are collected as instructions as well.
 ///
-/// A rescan builds fresh lists but transfers the enabled flag from the
-/// previous lists for items found at the same file path, so user toggles
-/// survive reordering and rescans. The lists persist to disk between runs.
-/// Callers rescan when a session starts or when the customization folder
-/// list changes.
+/// A rescan builds fresh lists but transfers enabled flags by stable item
+/// identity. Bundled identities use bundle-relative paths, so user toggles
+/// survive application updates and installation-directory changes. The
+/// lists persist to disk between runs. Callers rescan when a session starts
+/// or when the customization folder list changes.
 /// </summary>
 public static class CustomizationService
 {
+	public const string SessionToolsEnvironmentVariable = "TURBOPILOT_SESSION_TOOLS";
+
+	public const string ExecutableEnvironmentVariable = "TURBOPILOT_EXECUTABLE";
+
 	private const string LibraryFileName = "customizations.json";
 
 	private const string CanonicalInstructionsFileName = "copilot-instructions.md";
 
 	private const string InstructionsSuffix = ".instructions.md";
+
+	private const string BundledSourceId = "turbopilot-session-tools";
+
+	private sealed record CustomizationRoot(string Path, bool IsBuiltIn);
+
+	internal static string? BundledRootOverride { get; set; }
+
+	/// <summary>
+	/// The application-owned customization root copied beside TurboPilot.
+	/// </summary>
+	public static string BundledRoot => Path.GetFullPath(
+		BundledRootOverride ?? Path.Combine(AppContext.BaseDirectory, "SessionTools"));
 
 	private static readonly string[] AgentInstructionPaths =
 	[
@@ -59,13 +76,25 @@ public static class CustomizationService
 		LibraryFileName);
 
 	/// <summary>
+	/// Publishes application-owned paths to child CLI processes. Values are
+	/// always replaced with paths owned by this TurboPilot process.
+	/// </summary>
+	public static void ConfigureProcessEnvironment()
+	{
+		Environment.SetEnvironmentVariable(SessionToolsEnvironmentVariable, BundledRoot);
+		if (!string.IsNullOrWhiteSpace(Environment.ProcessPath))
+			Environment.SetEnvironmentVariable(
+				ExecutableEnvironmentVariable, Path.GetFullPath(Environment.ProcessPath));
+	}
+
+	/// <summary>
 	/// The most recently scanned (or loaded from disk) lists.
 	/// </summary>
 	public static CustomizationLibrary Current { get; private set; } = Load();
 
 	/// <summary>
-	/// Rebuilds all three lists from the search roots, transfers the
-	/// enabled flag from the previous lists for items at the same path,
+	/// Rebuilds the customization lists from the search roots, transfers
+	/// enabled flags from the previous lists by stable identity,
 	/// persists the result and makes it current.
 	/// </summary>
 	/// <param name="workspaceFolder">
@@ -85,15 +114,15 @@ public static class CustomizationService
 	/// <summary>
 	/// Builds a library from the given folder list (plus the personal and
 	/// workspace roots) and transfers enabled flags from
-	/// <paramref name="previous"/> by key, without touching the live lists
-	/// or disk. Used by the Customization dialog to refresh its working
-	/// copy after staged folder changes or an options load.
+	/// <paramref name="previous"/> by stable identity, without touching
+	/// the live lists or disk. Used by the Customization dialog to refresh
+	/// its working copy after staged folder changes or an options load.
 	/// </summary>
 	public static CustomizationLibrary Preview(string? workspaceFolder,
 		IReadOnlyList<string> folders, CustomizationLibrary previous)
 	{
 		CustomizationLibrary library = Collect(
-			GetSearchRoots(workspaceFolder, folders), workspaceFolder);
+			GetSearchSources(workspaceFolder, folders), workspaceFolder);
 
 		TransferEnabled(previous.Prompts, library.Prompts);
 		TransferEnabled(previous.Agents, library.Agents);
@@ -144,15 +173,20 @@ public static class CustomizationService
 
 	// ------------------------------------------------------------------ scan
 
-	private static CustomizationLibrary Collect(IEnumerable<string> roots, string? workspaceFolder)
+	private static CustomizationLibrary Collect(
+		IEnumerable<CustomizationRoot> roots,
+		string? workspaceFolder)
 	{
 		var rootList = roots.ToList();
-		var standardRoots = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
-		{
-			SharedConfigurationHome(),
-		};
-		if (!string.IsNullOrWhiteSpace(workspaceFolder))
-			standardRoots.Add(Path.Combine(workspaceFolder.Trim(), ".github"));
+		string personalRoot = SharedConfigurationHome();
+		string? workspaceRoot = string.IsNullOrWhiteSpace(workspaceFolder)
+			? null
+			: Path.Combine(workspaceFolder.Trim(), ".github");
+		var standardRoots = rootList
+			.Where(root => PathEquals(root.Path, personalRoot)
+				|| (workspaceRoot is not null && PathEquals(root.Path, workspaceRoot)))
+			.Select(root => root.Path)
+			.ToHashSet(StringComparer.OrdinalIgnoreCase);
 
 		var library = new CustomizationLibrary();
 		var usedPromptNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -161,12 +195,16 @@ public static class CustomizationService
 		var usedInstructionNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 		var usedMcpNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
-		foreach (string root in rootList)
+		foreach (CustomizationRoot root in rootList)
 		{
 			CollectPrompts(root, library, usedPromptNames);
 			CollectAgents(root, library, usedAgentNames);
 			CollectSkills(root, library, usedSkillNames);
-			CollectInstructions(root, library, usedInstructionNames, standardRoots.Contains(root));
+			CollectInstructions(
+				root,
+				library,
+				usedInstructionNames,
+				standardRoots.Contains(root.Path));
 			CollectMcpServers(root, library, usedMcpNames);
 		}
 
@@ -177,35 +215,58 @@ public static class CustomizationService
 	}
 
 	/// <summary>
-	/// The roots a scan covers: the personal folder, the given
+	/// The roots a scan covers: the bundled source, personal folder, given
 	/// customization folders, then the workspace .github folder.
 	/// </summary>
 	public static IEnumerable<string> GetSearchRoots(string? workspaceFolder,
+		IReadOnlyList<string> folders) =>
+		GetSearchSources(workspaceFolder, folders).Select(source => source.Path);
+
+	private static IEnumerable<CustomizationRoot> GetSearchSources(
+		string? workspaceFolder,
 		IReadOnlyList<string> folders)
 	{
 		var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
-		string personal = SharedConfigurationHome();
-		if (AddRoot(seen, personal))
-			yield return personal;
+		string? bundled = AddRoot(seen, BundledRoot);
+		if (bundled is not null)
+			yield return new CustomizationRoot(bundled, IsBuiltIn: true);
+
+		string? personal = AddRoot(seen, SharedConfigurationHome());
+		if (personal is not null)
+			yield return new CustomizationRoot(personal, IsBuiltIn: false);
 
 		foreach (string folder in folders)
 		{
-			string trimmed = folder.Trim();
-			if (AddRoot(seen, trimmed))
-				yield return trimmed;
+			string? additional = AddRoot(seen, folder.Trim());
+			if (additional is not null)
+				yield return new CustomizationRoot(additional, IsBuiltIn: false);
 		}
 
 		if (!string.IsNullOrWhiteSpace(workspaceFolder))
 		{
-			string github = Path.Combine(workspaceFolder.Trim(), ".github");
-			if (AddRoot(seen, github))
-				yield return github;
+			string? github = AddRoot(
+				seen, Path.Combine(workspaceFolder.Trim(), ".github"));
+			if (github is not null)
+				yield return new CustomizationRoot(github, IsBuiltIn: false);
 		}
 	}
 
-	private static bool AddRoot(HashSet<string> seen, string path) =>
-		!string.IsNullOrWhiteSpace(path) && Directory.Exists(path) && seen.Add(path);
+	private static string? AddRoot(HashSet<string> seen, string path)
+	{
+		if (string.IsNullOrWhiteSpace(path))
+			return null;
+
+		try
+		{
+			string fullPath = Path.TrimEndingDirectorySeparator(Path.GetFullPath(path));
+			return Directory.Exists(fullPath) && seen.Add(fullPath) ? fullPath : null;
+		}
+		catch (Exception ex) when (ex is ArgumentException or NotSupportedException or PathTooLongException)
+		{
+			return null;
+		}
+	}
 
 	private static string SharedConfigurationHome()
 	{
@@ -218,27 +279,36 @@ public static class CustomizationService
 	private static string DefaultSharedConfigurationHome() => Path.Combine(
 		Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".copilot");
 
-	private static void CollectPrompts(string root, CustomizationLibrary library, HashSet<string> usedNames)
+	private static void CollectPrompts(
+		CustomizationRoot root,
+		CustomizationLibrary library,
+		HashSet<string> usedNames)
 	{
-		foreach (string file in EnumerateFiles(Path.Combine(root, "prompts"), "*.md"))
+		foreach (string file in EnumerateFiles(Path.Combine(root.Path, "prompts"), "*.md"))
 		{
 			string name = MakeUniqueName(Path.GetFileNameWithoutExtension(file), usedNames);
-			library.Prompts[file] = new CustomizationItem { FilePath = file, Name = name };
+			library.Prompts[file] = CreateItem(root, file, name);
 		}
 	}
 
-	private static void CollectAgents(string root, CustomizationLibrary library, HashSet<string> usedNames)
+	private static void CollectAgents(
+		CustomizationRoot root,
+		CustomizationLibrary library,
+		HashSet<string> usedNames)
 	{
-		foreach (string file in EnumerateFiles(Path.Combine(root, "agents"), "*.md"))
+		foreach (string file in EnumerateFiles(Path.Combine(root.Path, "agents"), "*.md"))
 		{
 			string name = MakeUniqueName(Path.GetFileNameWithoutExtension(file), usedNames);
-			library.Agents[file] = new CustomizationItem { FilePath = file, Name = name };
+			library.Agents[file] = CreateItem(root, file, name);
 		}
 	}
 
-	private static void CollectSkills(string root, CustomizationLibrary library, HashSet<string> usedNames)
+	private static void CollectSkills(
+		CustomizationRoot root,
+		CustomizationLibrary library,
+		HashSet<string> usedNames)
 	{
-		string skillsDir = Path.Combine(root, "skills");
+		string skillsDir = Path.Combine(root.Path, "skills");
 		if (!Directory.Exists(skillsDir))
 			return;
 
@@ -250,18 +320,22 @@ public static class CustomizationService
 				continue;
 
 			string name = MakeUniqueName(Path.GetFileName(folder), usedNames);
-			library.Skills[skillFile] = new CustomizationItem { FilePath = skillFile, Name = name };
+			library.Skills[skillFile] = CreateItem(root, skillFile, name);
 		}
 	}
 
-	private static void CollectInstructions(string root, CustomizationLibrary library,
+	private static void CollectInstructions(CustomizationRoot root, CustomizationLibrary library,
 		HashSet<string> usedNames, bool isCliStandard)
 	{
-		AddInstruction(Path.Combine(root, CanonicalInstructionsFileName),
-			library, usedNames, isCliStandard);
+		AddInstruction(Path.Combine(root.Path, CanonicalInstructionsFileName),
+			library, usedNames, isCliStandard, root);
 		foreach (string file in EnumerateFiles(
-			Path.Combine(root, "instructions"), "*" + InstructionsSuffix, SearchOption.AllDirectories))
-			AddInstruction(file, library, usedNames, isCliStandard);
+			Path.Combine(root.Path, "instructions"),
+			"*" + InstructionsSuffix,
+			SearchOption.AllDirectories))
+		{
+			AddInstruction(file, library, usedNames, isCliStandard, root);
+		}
 	}
 
 	private static void CollectCliInstructionDirectories(
@@ -427,7 +501,8 @@ public static class CustomizationService
 	}
 
 	private static void AddInstruction(string file, CustomizationLibrary library,
-		HashSet<string> usedNames, bool isCliStandard = false)
+		HashSet<string> usedNames, bool isCliStandard = false,
+		CustomizationRoot? source = null)
 	{
 		if (!File.Exists(file))
 			return;
@@ -447,27 +522,61 @@ public static class CustomizationService
 		library.Instructions[file] = new CustomizationItem
 		{
 			FilePath = file,
+			Identity = MakeIdentity(source, file),
 			Name = MakeUniqueName(name, usedNames),
 			IsCliStandard = isCliStandard,
+			IsBuiltIn = source?.IsBuiltIn == true,
 		};
 	}
 
-	private static void CollectMcpServers(string root, CustomizationLibrary library, HashSet<string> usedNames)
+	private static void CollectMcpServers(
+		CustomizationRoot root,
+		CustomizationLibrary library,
+		HashSet<string> usedNames)
 	{
-		foreach (string file in EnumerateFiles(root, "*.mcp.json"))
+		foreach (string file in EnumerateFiles(root.Path, "*.mcp.json"))
 		{
 			foreach (string serverName in McpConfig.ReadServerNames(file))
 			{
 				string key = MakeKey(file, serverName);
 				string name = MakeUniqueName(serverName, usedNames);
-				library.McpServers[key] = new CustomizationItem
-				{
-					FilePath = file,
-					Element = serverName,
-					Name = name,
-				};
+				library.McpServers[key] = CreateItem(root, file, name, serverName);
 			}
 		}
+	}
+
+	private static CustomizationItem CreateItem(
+		CustomizationRoot root,
+		string file,
+		string name,
+		string? element = null) => new()
+	{
+		FilePath = file,
+		Identity = MakeIdentity(root, file, element),
+		Element = element,
+		Name = name,
+		IsBuiltIn = root.IsBuiltIn,
+	};
+
+	private static string MakeIdentity(
+		CustomizationRoot? source,
+		string file,
+		string? element = null)
+	{
+		string identity;
+		if (source?.IsBuiltIn == true)
+		{
+			string relative = Path.GetRelativePath(source.Path, file)
+				.Replace(Path.DirectorySeparatorChar, '/')
+				.Replace(Path.AltDirectorySeparatorChar, '/');
+			identity = $"{BundledSourceId}/{relative}";
+		}
+		else
+		{
+			identity = Path.GetFullPath(file);
+		}
+
+		return element is null ? identity : $"{identity}#{element}";
 	}
 
 	/// <summary>
@@ -503,16 +612,24 @@ public static class CustomizationService
 
 	// ------------------------------------------------------------------ state
 
-	private static void TransferEnabled(
+	internal static void TransferEnabled(
 		Dictionary<string, CustomizationItem> previous,
 		Dictionary<string, CustomizationItem> current)
 	{
-		foreach (var (path, item) in current)
+		var previousByIdentity = new Dictionary<string, CustomizationItem>(
+			StringComparer.OrdinalIgnoreCase);
+		foreach (var (key, item) in previous)
+			previousByIdentity[EffectiveIdentity(key, item)] = item;
+
+		foreach (var (key, item) in current)
 		{
-			if (previous.TryGetValue(path, out var old))
+			if (previousByIdentity.TryGetValue(EffectiveIdentity(key, item), out var old))
 				item.Enabled = old.Enabled;
 		}
 	}
+
+	private static string EffectiveIdentity(string key, CustomizationItem item) =>
+		string.IsNullOrWhiteSpace(item.Identity) ? key : item.Identity;
 
 	/// <summary>
 	/// Writes the library to disk. Failures are swallowed: the in-memory

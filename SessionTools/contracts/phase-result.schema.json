@@ -1,0 +1,103 @@
+{
+	"$schema": "https://json-schema.org/draft/2020-12/schema",
+	"title": "Verified Phase Result",
+	"description": "Durable evidence produced by one executor session and reviewed before phase replacement.",
+	"type": "object",
+	"additionalProperties": false,
+	"required": [
+		"schemaVersion",
+		"roadmapId",
+		"phaseId",
+		"completedAt",
+		"summary",
+		"acceptanceCriteria",
+		"validation",
+		"filesChanged"
+	],
+	"properties": {
+		"schemaVersion": {
+			"const": "1.0"
+		},
+		"roadmapId": {
+			"type": "string",
+			"minLength": 1
+		},
+		"phaseId": {
+			"type": "string",
+			"pattern": "^[0-9]{2,}$"
+		},
+		"completedAt": {
+			"type": "string",
+			"format": "date-time"
+		},
+		"summary": {
+			"type": "string",
+			"minLength": 1
+		},
+		"acceptanceCriteria": {
+			"type": "array",
+			"minItems": 1,
+			"items": {
+				"$ref": "#/$defs/evidence"
+			}
+		},
+		"validation": {
+			"type": "array",
+			"minItems": 1,
+			"items": {
+				"type": "object",
+				"additionalProperties": false,
+				"required": [
+					"command",
+					"passed",
+					"evidence"
+				],
+				"properties": {
+					"command": {
+						"type": "string",
+						"minLength": 1
+					},
+					"passed": {
+						"const": true
+					},
+					"evidence": {
+						"type": "string",
+						"minLength": 1
+					}
+				}
+			}
+		},
+		"filesChanged": {
+			"type": "array",
+			"uniqueItems": true,
+			"items": {
+				"type": "string",
+				"minLength": 1
+			}
+		}
+	},
+	"$defs": {
+		"evidence": {
+			"type": "object",
+			"additionalProperties": false,
+			"required": [
+				"id",
+				"passed",
+				"evidence"
+			],
+			"properties": {
+				"id": {
+					"type": "string",
+					"minLength": 1
+				},
+				"passed": {
+					"const": true
+				},
+				"evidence": {
+					"type": "string",
+					"minLength": 1
+				}
+			}
+		}
+	}
+}

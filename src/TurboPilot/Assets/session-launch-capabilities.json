@@ -4,6 +4,17 @@
   "requestTransport": "json-file",
   "statusTransport": "json-file",
   "supportsAttachments": true,
+  "supportsSessionControl": true,
+  "controlTransport": "json-file",
+  "controlContractVersion": "1.0",
+  "controlActions": [
+    "replace",
+    "close"
+  ],
+  "controlDispositions": [
+    "abandon",
+    "summarize_and_store"
+  ],
   "sessionStates": [
     "starting",
     "connecting",

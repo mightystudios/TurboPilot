@@ -61,17 +61,26 @@ internal static class SessionLaunchRequestLoader
 		}
 
 		string statusPath;
+		string controlPath;
 		try
 		{
 			statusPath = CanonicalJsonFile(
 				request.SessionStatusPath, "The session status path", mustExist: false);
+			controlPath = string.IsNullOrWhiteSpace(request.SessionControlPath)
+				? ""
+				: CanonicalJsonFile(
+					request.SessionControlPath, "The session control path", mustExist: false);
 		}
 		catch (Exception ex) when (ex is ArgumentException or NotSupportedException or PathTooLongException)
 		{
 			throw new SessionLaunchRequestException(ex.Message, innerException: ex);
 		}
 
-		request = request with { SessionStatusPath = statusPath };
+		request = request with
+		{
+			SessionStatusPath = statusPath,
+			SessionControlPath = controlPath,
+		};
 
 		void Fail(string message, Exception? innerException = null) =>
 			throw new SessionLaunchRequestException(message, request, innerException);
@@ -114,6 +123,13 @@ internal static class SessionLaunchRequestLoader
 		if (string.Equals(requestPath, statusPath, StringComparison.OrdinalIgnoreCase)
 			|| attachments.Contains(statusPath, StringComparer.OrdinalIgnoreCase))
 			Fail("The session status path must be different from the launch request and attachment paths.");
+		if (controlPath.Length > 0
+			&& (string.Equals(requestPath, controlPath, StringComparison.OrdinalIgnoreCase)
+				|| string.Equals(statusPath, controlPath, StringComparison.OrdinalIgnoreCase)
+				|| attachments.Contains(controlPath, StringComparer.OrdinalIgnoreCase)))
+		{
+			Fail("The session control path must be different from the launch request, status, and attachment paths.");
+		}
 
 		request = request with
 		{

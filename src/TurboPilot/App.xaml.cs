@@ -1,4 +1,5 @@
 using System.Windows;
+using TurboPilot.Customizations;
 using TurboPilot.Orchestration;
 using Theme = TurbolandTheme.Wpf.TurbolandTheme;
 
@@ -10,6 +11,7 @@ public partial class App : System.Windows.Application
 	{
 		base.OnStartup(e);
 
+		CustomizationService.ConfigureProcessEnvironment();
 		Theme.Apply(this, TurbolandTheme.Core.ThemeMode.Authentic);
 
 		string? launchRequestPath;

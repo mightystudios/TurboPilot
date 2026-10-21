@@ -11,10 +11,17 @@ public sealed class CustomizationItem
 {
 	/// <summary>
 	/// Full path to the file that defines the item. For a skill this is
-	/// the SKILL.md inside the skill folder. Doubles as the identity used
-	/// to carry the enabled flag across rescans.
+	/// the SKILL.md inside the skill folder.
 	/// </summary>
 	public required string FilePath { get; init; }
+
+	/// <summary>
+	/// Stable identity used to carry options across rescans. Ordinary
+	/// customizations use their path-based map key. Bundled items use an
+	/// application-owned source ID and bundle-relative path so an update
+	/// or installation-directory change does not reset their options.
+	/// </summary>
+	public string Identity { get; set; } = "";
 
 	/// <summary>
 	/// Unique short name: the skill folder name for skills, the file stem
@@ -41,13 +48,21 @@ public sealed class CustomizationItem
 	/// </summary>
 	public bool IsCliStandard { get; set; }
 
+	/// <summary>
+	/// Whether this item comes from TurboPilot's application-owned
+	/// SessionTools bundle.
+	/// </summary>
+	public bool IsBuiltIn { get; set; }
+
 	/// <summary>Independent copy, so edits can be staged and discarded.</summary>
 	public CustomizationItem Clone() => new()
 	{
 		FilePath = FilePath,
+		Identity = Identity,
 		Element = Element,
 		Name = Name,
 		Enabled = Enabled,
 		IsCliStandard = IsCliStandard,
+		IsBuiltIn = IsBuiltIn,
 	};
 }

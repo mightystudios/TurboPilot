@@ -311,6 +311,7 @@ public partial class CustomizeDialog : TurbolandFloatingDialog
 		{
 			$"Type: {TypeNameFor(item)}",
 			$"Name: {item.Name}",
+			$"Source: {(item.IsBuiltIn ? "Built in" : "User or workspace")}",
 			$"Path: {item.FilePath}",
 			$"State: {(item.Enabled ? "Enabled" : "Disabled")}",
 		};
@@ -556,6 +557,9 @@ public partial class CustomizeDialog : TurbolandFloatingDialog
 		bool foldersAdded = false;
 		foreach (var item in LoadedItems(loaded))
 		{
+			if (item.IsBuiltIn)
+				continue;
+
 			string? root = CustomizationService.RootFolderFor(item.FilePath);
 			if (root is not null && Directory.Exists(root) && roots.Add(root))
 			{
@@ -570,11 +574,11 @@ public partial class CustomizeDialog : TurbolandFloatingDialog
 		// Rebuild first so items from newly added folders exist, then let
 		// the loaded flags win over the staged ones for matching keys.
 		_library = CustomizationService.Preview(workspace, _folders, _library);
-		TransferEnabledInto(loaded.Prompts, _library.Prompts);
-		TransferEnabledInto(loaded.Agents, _library.Agents);
-		TransferEnabledInto(loaded.Skills, _library.Skills);
-		TransferEnabledInto(loaded.Instructions, _library.Instructions);
-		TransferEnabledInto(loaded.McpServers, _library.McpServers);
+		CustomizationService.TransferEnabled(loaded.Prompts, _library.Prompts);
+		CustomizationService.TransferEnabled(loaded.Agents, _library.Agents);
+		CustomizationService.TransferEnabled(loaded.Skills, _library.Skills);
+		CustomizationService.TransferEnabled(loaded.Instructions, _library.Instructions);
+		CustomizationService.TransferEnabled(loaded.McpServers, _library.McpServers);
 		RefreshFoundItems();
 		MarkDirty();
 	}
@@ -585,17 +589,6 @@ public partial class CustomizeDialog : TurbolandFloatingDialog
 			.Concat(loaded.Skills.Values)
 			.Concat(loaded.Instructions.Values)
 			.Concat(loaded.McpServers.Values);
-
-	private static void TransferEnabledInto(
-		Dictionary<string, CustomizationItem> loaded,
-		Dictionary<string, CustomizationItem> staged)
-	{
-		foreach (var (key, item) in loaded)
-		{
-			if (staged.TryGetValue(key, out var target))
-				target.Enabled = item.Enabled;
-		}
-	}
 
 	/// <summary>
 	/// Adapts a raw HWND to <see cref="System.Windows.Forms.IWin32Window"/> so the

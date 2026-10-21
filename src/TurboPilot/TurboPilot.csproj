@@ -57,6 +57,40 @@
 			<CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
 			<CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
 		</None>
+
+		<!-- Application-owned phase workflow customizations. Keep this
+		     allowlist explicit so tests and generated Python files never
+		     enter the runtime bundle. -->
+		<None Include="..\..\SessionTools\README.md">
+			<Link>SessionTools\README.md</Link>
+			<TargetPath>SessionTools\README.md</TargetPath>
+			<CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+			<CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+		</None>
+		<None Include="..\..\SessionTools\agents\**\*">
+			<Link>SessionTools\agents\%(RecursiveDir)%(Filename)%(Extension)</Link>
+			<TargetPath>SessionTools\agents\%(RecursiveDir)%(Filename)%(Extension)</TargetPath>
+			<CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+			<CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+		</None>
+		<None Include="..\..\SessionTools\contracts\**\*">
+			<Link>SessionTools\contracts\%(RecursiveDir)%(Filename)%(Extension)</Link>
+			<TargetPath>SessionTools\contracts\%(RecursiveDir)%(Filename)%(Extension)</TargetPath>
+			<CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+			<CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+		</None>
+		<None Include="..\..\SessionTools\skills\**\*">
+			<Link>SessionTools\skills\%(RecursiveDir)%(Filename)%(Extension)</Link>
+			<TargetPath>SessionTools\skills\%(RecursiveDir)%(Filename)%(Extension)</TargetPath>
+			<CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+			<CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+		</None>
+		<None Include="..\..\SessionTools\src\**\*.py">
+			<Link>SessionTools\src\%(RecursiveDir)%(Filename)%(Extension)</Link>
+			<TargetPath>SessionTools\src\%(RecursiveDir)%(Filename)%(Extension)</TargetPath>
+			<CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+			<CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+		</None>
 	</ItemGroup>
 
 	<ItemGroup>
