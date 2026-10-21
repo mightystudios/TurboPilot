@@ -25,8 +25,8 @@ public partial class CustomizeDialog : TurbolandFloatingDialog
 	private readonly string? _workspaceFolder;
 
 	// Deep copy of the collected library; the live lists stay untouched
-	// until Commit on OK. Replaced (not mutated) when a load rebuilds it
-	// after staged folder additions.
+	// until Commit on OK. Replaced (not mutated) whenever staged folders
+	// change or an options load rebuilds it.
 	private CustomizationLibrary _library;
 
 	// The caption without the unsaved-changes marker.
@@ -153,6 +153,7 @@ public partial class CustomizeDialog : TurbolandFloatingDialog
 		_folders.Add(trimmed);
 		ReloadList();
 		listBox.SelectedIndex = _folders.Count - 1;
+		RefreshLibrary();
 		MarkDirty();
 	}
 
@@ -170,6 +171,7 @@ public partial class CustomizeDialog : TurbolandFloatingDialog
 		ReloadList();
 		if (_folders.Count > 0)
 			listBox.SelectedIndex = Math.Min(i, _folders.Count - 1);
+		RefreshLibrary();
 		MarkDirty();
 	}
 
@@ -177,6 +179,12 @@ public partial class CustomizeDialog : TurbolandFloatingDialog
 		_folders.Any(f => string.Equals(f, candidate, StringComparison.OrdinalIgnoreCase));
 
 	// ------------------------------------------------------------------ found items
+
+	private void RefreshLibrary()
+	{
+		_library = CustomizationService.Preview(_workspaceFolder, _folders, _library);
+		RefreshFoundItems();
+	}
 
 	/// <summary>
 	/// Fills the per-type tabs from the collected library. With the

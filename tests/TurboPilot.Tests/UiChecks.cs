@@ -479,7 +479,7 @@ internal static class UiChecks
 			CheckReasoningEffortDefaults(workspace);
 			CheckPastSessionsLayout(window);
 			CheckPastSessionsDelete(application, window, workspace);
-			CheckCustomizationDiscoveryDialog(workspace);
+			CheckCustomizationDiscoveryDialog(application, workspace);
 			CheckPromptReferences(window);
 			await CheckCommandsAsync(window, workspace);
 			CheckAttachmentDialogImagePreview(application, window, workspace);
@@ -2129,11 +2129,24 @@ internal static class UiChecks
 		finally { dialog.Close(); }
 	}
 
-	private static void CheckCustomizationDiscoveryDialog(TestWorkspace workspace)
+	private static void CheckCustomizationDiscoveryDialog(
+		Application application, TestWorkspace workspace)
 	{
 		string home = Path.Combine(workspace.Root, "dialog-copilot-home");
 		string canonical = workspace.Write(
 			"dialog-copilot-home\\copilot-instructions.md", "DIALOG_CANONICAL_INSTRUCTION");
+		string additional = Path.Combine(workspace.Root, "dialog-additional");
+		string prompt = workspace.Write(
+			"dialog-additional\\prompts\\review.prompt.md", "# Review prompt");
+		string agent = workspace.Write(
+			"dialog-additional\\agents\\review.agent.md", "# Review agent");
+		string skill = workspace.Write(
+			"dialog-additional\\skills\\review\\SKILL.md", "# Review skill");
+		string instruction = workspace.Write(
+			"dialog-additional\\instructions\\review.instructions.md", "# Review instruction");
+		string mcp = workspace.Write(
+			"dialog-additional\\review.mcp.json",
+			"""{"servers":{"review":{"type":"http","url":"http://127.0.0.1:1/mcp"}}}""");
 		string? originalHome = Environment.GetEnvironmentVariable("COPILOT_HOME");
 		string? originalDirectories = Environment.GetEnvironmentVariable("COPILOT_CUSTOM_INSTRUCTIONS_DIRS");
 		try
@@ -2144,15 +2157,77 @@ internal static class UiChecks
 				workspaceFolder: null, folders: [], previous: new CustomizationLibrary());
 			try
 			{
+				dialog.Show();
+				dialog.UpdateLayout();
 				var library = Field<CustomizationLibrary>(dialog, "_library");
 				Check.True(library.Instructions.ContainsKey(canonical),
 					"The Customization dialog must scan the canonical instruction before a session starts.");
 				Check.Equal("Instructions (1)",
 					Control<TabItem>(dialog, "tabInstructions").Header,
 					"Show the scanned canonical instruction in the tab count");
+				library.Instructions[canonical].Enabled = false;
+
+				Invoke(dialog, "AddFolder", additional);
+				library = Field<CustomizationLibrary>(dialog, "_library");
+				Check.True(library.Prompts.ContainsKey(prompt)
+					&& library.Agents.ContainsKey(agent)
+					&& library.Skills.ContainsKey(skill)
+					&& library.Instructions.ContainsKey(instruction)
+					&& library.McpServers.ContainsKey(CustomizationService.MakeKey(mcp, "review")),
+					"Adding a search path must immediately discover every customization type.");
+				Check.True(!library.Instructions[canonical].Enabled,
+					"Refreshing after a path change must preserve staged enabled flags.");
+				Check.Equal(library.Prompts.Count,
+					Control<ListBox>(dialog, "listPrompts").Items.Count,
+					"Refresh the Prompts list after adding a search path");
+				Check.Equal(library.Agents.Count,
+					Control<ListBox>(dialog, "listAgents").Items.Count,
+					"Refresh the Agents list after adding a search path");
+				Check.Equal(library.Skills.Count,
+					Control<ListBox>(dialog, "listSkills").Items.Count,
+					"Refresh the Skills list after adding a search path");
+				Check.Equal(library.Instructions.Count,
+					Control<ListBox>(dialog, "listInstructions").Items.Count,
+					"Refresh the Instructions list after adding a search path");
+				Check.Equal(library.McpServers.Count,
+					Control<ListBox>(dialog, "listMcpServers").Items.Count,
+					"Refresh the MCP Servers list after adding a search path");
+
+				using (DialogAction<YesNoDialog>(application,
+					confirm => Invoke(confirm, "OnYes", confirm, new RoutedEventArgs())))
+				{
+					Invoke(dialog, "OnDelete", dialog, new RoutedEventArgs());
+				}
+
+				library = Field<CustomizationLibrary>(dialog, "_library");
+				Check.True(!library.Prompts.ContainsKey(prompt)
+					&& !library.Agents.ContainsKey(agent)
+					&& !library.Skills.ContainsKey(skill)
+					&& !library.Instructions.ContainsKey(instruction)
+					&& !library.McpServers.ContainsKey(CustomizationService.MakeKey(mcp, "review")),
+					"Deleting a search path must immediately remove all of its customization items.");
+				Check.True(!library.Instructions[canonical].Enabled,
+					"Refreshing after path removal must preserve remaining staged enabled flags.");
+				Check.Equal(library.Prompts.Count,
+					Control<ListBox>(dialog, "listPrompts").Items.Count,
+					"Refresh the Prompts list after deleting a search path");
+				Check.Equal(library.Agents.Count,
+					Control<ListBox>(dialog, "listAgents").Items.Count,
+					"Refresh the Agents list after deleting a search path");
+				Check.Equal(library.Skills.Count,
+					Control<ListBox>(dialog, "listSkills").Items.Count,
+					"Refresh the Skills list after deleting a search path");
+				Check.Equal(library.Instructions.Count,
+					Control<ListBox>(dialog, "listInstructions").Items.Count,
+					"Refresh the Instructions list after deleting a search path");
+				Check.Equal(library.McpServers.Count,
+					Control<ListBox>(dialog, "listMcpServers").Items.Count,
+					"Refresh the MCP Servers list after deleting a search path");
+				Console.WriteLine("PASS customization dialog refreshes every list after search path changes");
 			}
 			finally
 			{
+				SetField(dialog, "_dirty", false);
 				dialog.Close();
 			}
 		}
