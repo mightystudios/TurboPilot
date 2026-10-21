@@ -1685,7 +1685,7 @@ public sealed partial class ChatService : IAsyncDisposable
 	/// carrying the same meaning, the better it reads.
 	/// </summary>
 	internal const string ArchivePrompt =
-		"Summarize this entire session as " + ArchiveMarker + ", "
+		"Quickly summarize the most recent completed work in this session as " + ArchiveMarker + ", "
 		+ "in the past tense, saying only what was worked on. "
 		+ "Write it as an action, not as a narration: no \"I\", no \"we\", no \"the session\", "
 		+ "and no words about reading, understanding or discussing unless that was the work. "
@@ -1708,13 +1708,21 @@ public sealed partial class ChatService : IAsyncDisposable
 	private const int ArchiveMaxChars = 100;
 
 	/// <summary>
-	/// Records one sentence saying what the session was about, asked of
-	/// the model as the session ends.
+	/// The archive label is best effort and must not make ending a
+	/// session look stuck. Aborting gets its own shorter bound because
+	/// cleanup must not replace one unbounded wait with another.
+	/// </summary>
+	private static readonly TimeSpan ArchiveDeadline = TimeSpan.FromSeconds(60);
+	private static readonly TimeSpan ArchiveAbortDeadline = TimeSpan.FromSeconds(5);
+
+	/// <summary>
+	/// Records one sentence naming the session's most recent completed
+	/// work, asked of the model as the session ends.
 	///
 	/// It is written at the end because that is the only point at which
 	/// the answer is known: the opening prompt says what was intended,
-	/// which is frequently not what the session turned out to be, and
-	/// that is the thing worth reading in an archive months later.
+	/// which is frequently not where the work finished, and the latter
+	/// is the thing worth reading in an archive months later.
 	///
 	/// The model is asked for the sentence outright rather than handed
 	/// the hand-off summarizer's document to be cut down locally. That
@@ -1731,8 +1739,14 @@ public sealed partial class ChatService : IAsyncDisposable
 	/// or a runtime already on its way down leaves the previous
 	/// line in place rather than holding up the shutdown it is part of.
 	/// </summary>
-	public async Task<string?> ArchiveAsync(CancellationToken cancellationToken = default)
+	public Task<string?> ArchiveAsync(CancellationToken cancellationToken = default) =>
+		ArchiveWithinAsync(ArchiveDeadline, cancellationToken);
+
+	internal async Task<string?> ArchiveWithinAsync(TimeSpan deadline, CancellationToken cancellationToken = default)
 	{
+		if (deadline <= TimeSpan.Zero)
+			throw new ArgumentOutOfRangeException(nameof(deadline), deadline, "The archive deadline must be positive.");
+
 		var session = _session;
 		SessionRecord? record;
 		lock (_sync) record = _record;
@@ -1757,7 +1771,9 @@ public sealed partial class ChatService : IAsyncDisposable
 			// waiting on.
 			if (_isWorking || HasPendingQuestion || Volatile.Read(ref _preparingHandoff) > 0) return null;
 
-			using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, _lifetime.Token);
+			using var deadlineSource = new CancellationTokenSource(deadline);
+			using var linked = CancellationTokenSource.CreateLinkedTokenSource(
+				cancellationToken, _lifetime.Token, deadlineSource.Token);
 
 			Task idle;
 			StringBuilder capture;
@@ -1781,21 +1797,26 @@ public sealed partial class ChatService : IAsyncDisposable
 					AgentMode = _agentMode,
 				}, linked.Token).ConfigureAwait(false);
 				await idle.WaitAsync(linked.Token).ConfigureAwait(false);
+				deadlineSource.Token.ThrowIfCancellationRequested();
+			}
+			catch (OperationCanceledException) when (linked.IsCancellationRequested)
+			{
+				await AbortArchiveTurnAsync(session).ConfigureAwait(false);
+				ResetArchiveTurn();
+				return null;
 			}
 			catch
 			{
-				lock (_sync)
-				{
-					_isWorking = false;
-					_turnStarted = 0;
-					_turnIdle?.TrySetResult();
-				}
-				StateChanged?.Invoke();
+				ResetArchiveTurn();
 				throw;
 			}
 			finally
 			{
-				lock (_sync) _capture = null;
+				lock (_sync)
+				{
+					if (ReferenceEquals(_capture, capture))
+						_capture = null;
+				}
 			}
 
 			var sentence = ArchiveLine(capture.ToString());
@@ -1820,6 +1841,39 @@ public sealed partial class ChatService : IAsyncDisposable
 			ErrorReceived?.Invoke("Could not summarize the session for the archive: " + ex.Message);
 			return null;
 		}
+	}
+
+	private async Task AbortArchiveTurnAsync(CopilotSession session)
+	{
+		ReleaseQuestions();
+		using var abortDeadline = new CancellationTokenSource(ArchiveAbortDeadline);
+		try
+		{
+			await session.AbortAsync(abortDeadline.Token).WaitAsync(abortDeadline.Token).ConfigureAwait(false);
+		}
+		catch (OperationCanceledException) when (abortDeadline.IsCancellationRequested)
+		{
+			ErrorReceived?.Invoke("The timed-out archive summary did not stop within 5 seconds.");
+		}
+		catch (Exception ex) when (ex is not OutOfMemoryException)
+		{
+			ErrorReceived?.Invoke("Could not stop the timed-out archive summary: " + ex.Message);
+		}
+	}
+
+	private void ResetArchiveTurn()
+	{
+		lock (_sync)
+		{
+			_isWorking = false;
+			_turnStarted = 0;
+			_deferredTimeoutMessage = null;
+			_turnIdle?.TrySetResult();
+			_streamedMessages.Clear();
+			_completedMessages.Clear();
+			_messageBuffers.Clear();
+		}
+		StateChanged?.Invoke();
 	}
 
 	/// <summary>

@@ -291,6 +291,10 @@ internal static class SessionFeatureChecks
 			Check.Equal("Documented the readme without touching code", line,
 				"Keep one short plain label out of what the model wrote");
 			Check.Equal(before + 1, provider.Requests.Count, "Ask the session model once");
+			var request = provider.Requests.Last().GetRawText();
+			Check.True(request.Contains("Quickly summarize the most recent completed work", StringComparison.Ordinal)
+				&& !request.Contains("Summarize this entire session", StringComparison.Ordinal),
+				"Ask for recent completed work rather than an exhaustive session review.");
 			Check.True(chat.Transcript == transcript,
 				"The archive turn is not part of the conversation, so it must leave the transcript alone.");
 			Check.True(!workspace.Store.ReadTranscript(sessionId).Contains("one plain sentence"),
@@ -323,6 +327,67 @@ internal static class SessionFeatureChecks
 			Check.True(await resumed.ArchiveAsync() is null, "A fragment is not a summary.");
 			Check.Equal("Documented the readme without touching code", workspace.Store.Load(sessionId).Summary,
 				"A session that could not summarize keeps the line it already had");
+		}
+
+		// A summary request that never reaches idle is interrupted at its
+		// deadline. The previously stored line remains the useful label.
+		await using (var timedOutResume = workspace.CreateChat())
+		{
+			await timedOutResume.ResumeAsync(sessionId, options);
+			provider.Replies.Enqueue(new LocalProvider.Reply("Continued again."));
+			await RuntimeChecks.SendAndWaitAsync(timedOutResume, "Carry on again.");
+			var previous = workspace.Store.Load(sessionId);
+			var held = new LocalProvider.Reply("This archive response never finishes.", Hold: true);
+			provider.Replies.Enqueue(held);
+			try
+			{
+				var archiving = timedOutResume.ArchiveWithinAsync(TimeSpan.FromSeconds(1));
+				await held.Started.Task.WaitAsync(TimeSpan.FromSeconds(15));
+				Check.True(await archiving.WaitAsync(TimeSpan.FromSeconds(10)) is null,
+					"A timed-out archive request returns no replacement summary.");
+				await held.Disconnected.Task.WaitAsync(TimeSpan.FromSeconds(5));
+			}
+			finally
+			{
+				held.Release.TrySetResult();
+			}
+			var after = workspace.Store.Load(sessionId);
+			Check.True(!timedOutResume.IsWorking, "A timed-out archive turn must leave the session idle.");
+			Check.Equal(previous.Summary, after.Summary, "A timeout must preserve the previous summary.");
+			Check.Equal(previous.SummaryRequests, after.SummaryRequests,
+				"A timeout must leave the previous summary's request position unchanged.");
+			Check.True(after.DisplayLabel.EndsWith(previous.Summary, StringComparison.Ordinal),
+				"The previous summary remains the Past Sessions label after a timeout.");
+		}
+
+		// A first summary can time out too. Leaving Summary empty lets the
+		// existing display policy identify the session by its opening request.
+		await using (var timedOutFirst = workspace.CreateChat())
+		{
+			await timedOutFirst.StartAsync(options);
+			var timedOutId = timedOutFirst.SessionId!;
+			provider.Replies.Enqueue(new LocalProvider.Reply("Started."));
+			await RuntimeChecks.SendAndWaitAsync(timedOutFirst, OpeningRequest);
+			var held = new LocalProvider.Reply("Another archive response that never finishes.", Hold: true);
+			provider.Replies.Enqueue(held);
+			try
+			{
+				var archiving = timedOutFirst.ArchiveWithinAsync(TimeSpan.FromSeconds(1));
+				await held.Started.Task.WaitAsync(TimeSpan.FromSeconds(15));
+				Check.True(await archiving.WaitAsync(TimeSpan.FromSeconds(10)) is null,
+					"A first archive timeout returns no synthetic summary.");
+				await held.Disconnected.Task.WaitAsync(TimeSpan.FromSeconds(5));
+			}
+			finally
+			{
+				held.Release.TrySetResult();
+			}
+			var after = workspace.Store.Load(timedOutId);
+			Check.True(!timedOutFirst.IsWorking, "A first archive timeout must leave the session idle.");
+			Check.Equal("", after.Summary, "Do not replace the opening request with a generic timeout label.");
+			Check.Equal(0, after.SummaryRequests, "A timed-out first summary remains eligible for a later retry.");
+			Check.True(after.DisplayLabel.Contains(OpeningRequest, StringComparison.Ordinal),
+				"The Past Sessions row falls back to the opening request.");
 		}
 
 		// Closed in the middle of a turn. Interrupting the user's own

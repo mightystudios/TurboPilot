@@ -25,12 +25,12 @@ public sealed class SessionRecord
 	public string Description { get; set; } = "";
 
 	/// <summary>
-	/// One sentence saying what the session was about, written by the
-	/// model as the session ends. An archive is read long after the work
-	/// is forgotten, so what it needs is what the session turned out to
-	/// be, which is not knowable when the opening prompt is typed. Empty
-	/// until the session has ended at least once, and empty for a session
-	/// that ended before this was recorded.
+	/// One sentence naming the session's most recent completed work,
+	/// written by the model as the session ends. An archive is read long
+	/// after the work is forgotten, so what it needs is where the work
+	/// finished, which is not knowable when the opening prompt is typed.
+	/// Empty until the session has ended at least once, and empty for a
+	/// session that ended before this was recorded.
 	/// </summary>
 	public string Summary { get; set; } = "";
 

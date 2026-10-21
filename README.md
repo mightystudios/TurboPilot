@@ -97,7 +97,7 @@ without depending on a source checkout or the current workspace.
 - **Past Sessions** lets you view, resume, or delete saved sessions. Use Ctrl or Shift to select multiple sessions for deletion.
 - The active session cannot be deleted while it is running.
 - Ending or replacing a session, resetting context, and closing the program ask how to handle the session history.
-  - **Summarize and Store** generates a short summary and keeps the history in Past Sessions.
+  - **Summarize and Store** asks for a short recent-work summary and keeps the history in Past Sessions. If it cannot finish within 60 seconds, TurboPilot interrupts it and uses the previous summary or opening request.
   - **Abandon** skips summarization and deletes the saved history.
 - Workspace changes are shown after each turn that modifies files. Files can be reviewed, compared, or reverted where Git history is available.
 
@@ -197,7 +197,7 @@ When `sessionControlPath` is present, the external tool may atomically create or
 | `replace` | Validate the referenced launch request, end the current session, start a fresh context in the same window, and submit the replacement request's initial prompt |
 | `close` | End the current session and close the TurboPilot window without interactive confirmation |
 
-`disposition` must be `abandon` or `summarize_and_store`. `abandon` skips another model call and removes the ended session from Past Sessions. `summarize_and_store` asks the current model for its archive label before retaining the session. A `replace` command requires `launchRequestPath`; a `close` command must omit it.
+`disposition` must be `abandon` or `summarize_and_store`. `abandon` skips another model call and removes the ended session from Past Sessions. `summarize_and_store` gives the current model up to 60 seconds to produce its archive label before retaining the session with the best existing fallback. A `replace` command requires `launchRequestPath`; a `close` command must omit it.
 
 The replacement request must use a new `launchId` and `sessionStatusPath` while retaining the same `sessionControlPath`. TurboPilot resolves and validates the replacement request before ending the live session. The old status file ends in `closed`; the new request owns a new status file and receives its prompt in a fresh SDK context.
 
