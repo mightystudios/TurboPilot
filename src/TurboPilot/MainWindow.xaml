@@ -249,6 +249,7 @@
 								IsReadOnly="True"
 								AcceptsTab="True" 
 								AcceptsReturn="True"
+								SpellCheck.IsEnabled="True"
 								AllowDrop="True"
 								PreviewDragEnter="Input_PreviewDragOver"
 								PreviewDragOver="Input_PreviewDragOver"

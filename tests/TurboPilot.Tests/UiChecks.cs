@@ -2389,6 +2389,7 @@ internal static class UiChecks
 			Check.Equal("Model Output", outputLabel.Content, "Display the output heading");
 			Check.True(ReferenceEquals(outputTabs, outputLabel.Target), "Associate the output label with its tabs.");
 			Check.True(ReferenceEquals(input, label.Target), "Associate the label with the prompt editor.");
+			Check.True(SpellCheck.GetIsEnabled(input), "Enable WPF spell checking in the prompt editor.");
 			window.Height = 640;
 			await LayoutAsync();
 			CheckBounds();

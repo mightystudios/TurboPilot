@@ -25,7 +25,7 @@ dotnet build .\TurboPilot.sln
 dotnet run --project .\src\TurboPilot
 ```
 
-Start a session with **Session -> Begin Session**. Choose a workspace, provider, model, reasoning effort, and mode. Use **Ctrl+Enter** or **Send** to submit a prompt. Sending while a response is running interrupts that response before sending the new prompt.
+Start a session with **Session -> Begin Session**. Choose a workspace, provider, model, reasoning effort, and mode. Use **Ctrl+Enter** or **Send** to submit a prompt. Sending while a response is running interrupts that response before sending the new prompt. The User Prompt editor uses WPF's built-in spell checking to underline misspelled words and offer corrections.
 
 TurboPilot displays streamed text in **Raw** and **Rendered** tabs. Rendered output supports Markdown, Mermaid diagrams, links, and local image previews. Questions and permission requests appear as reply cards; answer with a choice number, choice text, or the offered freeform response.
 
