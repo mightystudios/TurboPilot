@@ -1307,7 +1307,7 @@ public sealed partial class ChatService : IAsyncDisposable
 			{
 				var changes = WorkspaceChanges.Since(anchor);
 				if (changes.Count > 0)
-					AddNotice(NoticeFormatter.Changes(changes));
+					AddNotice(NoticeFormatter.Changes(changes, anchor));
 			}
 			catch (Exception)
 			{

@@ -105,10 +105,10 @@
 	// path as a markdown link of the form [path](kp-path:encoded). After
 	// marked.js renders, those become standard <a href="kp-path:..."> tags.
 	// These listeners forward left- and right-click intents to the host
-	// so it can shell-execute the file or reveal it in Explorer. Anchors
-	// are inserted dynamically on every block re-render, so a single
-	// document-level delegated listener is the simplest way to keep
-	// streaming updates working without rebinding handlers.
+	// so it can open the file in the registered editor (or VS Code when
+	// there is no association) or reveal it in Explorer. Anchors are
+	// inserted dynamically on every block re-render, so a single delegated
+	// listener keeps streaming updates working without rebinding handlers.
 
 	var KP_PATH_SCHEME = "kp-path:";
 	var KP_ACT_SCHEME = "kp-act:";

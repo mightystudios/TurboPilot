@@ -1,3 +1,4 @@
+using System.ComponentModel;
 using System.Diagnostics;
 using System.IO;
 
@@ -14,6 +15,7 @@ namespace TurboPilot.Tools;
 internal static class ExternalTools
 {
 	internal const string ScriptsFileName = "scripts.ps1";
+	private const int ErrorNoAssociation = 1155;
 
 	/// <summary>
 	/// The user's copy of the helper functions, outside any workspace.
@@ -90,6 +92,48 @@ internal static class ExternalTools
 			WorkingDirectory = workspace,
 			UseShellExecute = true,
 		};
+
+	/// <summary>Opens a file through its registered Windows application.</summary>
+	internal static ProcessStartInfo BuildDefaultEditor(string path) =>
+		new()
+		{
+			FileName = Path.GetFullPath(path),
+			Verb = "open",
+			UseShellExecute = true,
+		};
+
+	/// <summary>Opens one file with the Visual Studio Code launcher.</summary>
+	internal static ProcessStartInfo BuildVsCodeFile(string path)
+	{
+		string fullPath = Path.GetFullPath(path);
+		var startInfo = new ProcessStartInfo
+		{
+			FileName = "code",
+			Arguments = $"\"{fullPath}\"",
+			UseShellExecute = true,
+		};
+		string? directory = Path.GetDirectoryName(fullPath);
+		if (!string.IsNullOrEmpty(directory) && Directory.Exists(directory))
+			startInfo.WorkingDirectory = directory;
+		return startInfo;
+	}
+
+	/// <summary>
+	/// Opens a file with its registered application, falling back to
+	/// Visual Studio Code only when Windows reports no file association.
+	/// </summary>
+	internal static void OpenFile(string path, Action<ProcessStartInfo>? launch = null)
+	{
+		launch ??= Start;
+		try
+		{
+			launch(BuildDefaultEditor(path));
+		}
+		catch (Win32Exception ex) when (ex.NativeErrorCode == ErrorNoAssociation)
+		{
+			launch(BuildVsCodeFile(path));
+		}
+	}
 
 	internal static void Start(ProcessStartInfo startInfo) => Process.Start(startInfo)?.Dispose();
 

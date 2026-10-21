@@ -671,6 +671,7 @@ internal static class UiChecks
 			await CheckReadmeOfferAsync(application, window, workspace, provider, options);
 			await CheckSessionWindowAsync(application, window, workspace, provider, options);
 			await CheckExternalLinkAsync(window, webView, externalStarts);
+			await CheckFileLinkAsync(window, webView, externalStarts, workspace);
 			Check.Equal(0, provider.Errors.Count, "The UI provider must not hide request failures: "
 				+ string.Join(" | ", provider.Errors.Distinct()));
 		}
@@ -913,6 +914,44 @@ internal static class UiChecks
 		Check.Equal(before, webView.Source, "Keep the Rendered transcript loaded after a web link click.");
 		window.ClearOutput();
 		Console.WriteLine("PASS Rendered Markdown links open outside WebView2");
+	}
+
+	private static async Task CheckFileLinkAsync(
+		MainWindow window,
+		WebView2 webView,
+		List<System.Diagnostics.ProcessStartInfo> externalStarts,
+		TestWorkspace workspace)
+	{
+		string file = workspace.Write("workspace\\src\\click me.cs", "class ClickMe {}");
+		string href = "kp-path:" + Uri.EscapeDataString(file);
+		window.ClearOutput();
+		window.AppendOutput($"[click me.cs]({href})\r\n");
+
+		var found = false;
+		for (var attempt = 0; attempt < 100 && !found; attempt++)
+		{
+			using var result = JsonDocument.Parse(await webView.CoreWebView2.ExecuteScriptAsync(
+				"Array.from(document.querySelectorAll('#output a')).some(e => e.textContent === 'click me.cs')"));
+			found = result.RootElement.GetBoolean();
+			if (!found)
+				await Task.Delay(100);
+		}
+		Check.True(found, "The Rendered file link did not appear.");
+
+		int startsBefore = externalStarts.Count;
+		var sourceBefore = webView.Source;
+		await webView.CoreWebView2.ExecuteScriptAsync(
+			"Array.from(document.querySelectorAll('#output a')).find(e => e.textContent === 'click me.cs').click()");
+		await Check.UntilAsync(() => externalStarts.Count == startsBefore + 1,
+			"The file link was not handed to the system editor.");
+
+		var command = externalStarts[^1];
+		Check.Equal(file, command.FileName, "Open the clicked file path.");
+		Check.Equal("open", command.Verb, "Use the file's registered open action.");
+		Check.True(command.UseShellExecute, "Use the registered default application for file links.");
+		Check.Equal(sourceBefore, webView.Source, "Keep the Rendered transcript loaded after a file link click.");
+		window.ClearOutput();
+		Console.WriteLine("PASS Rendered file links open in the registered application");
 	}
 
 	private static async Task CheckResetDispositionAsync(Application application, MainWindow window,

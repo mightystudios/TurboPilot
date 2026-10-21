@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.IO;
 using System.Text;
 using System.Windows;
@@ -906,6 +907,28 @@ internal static class CoreChecks
 		Check.Equal("code", editor.FileName, "Resolve the VS Code launcher on PATH");
 		Check.Equal($"\"{workspace.Workspace}\"", editor.Arguments, "Open VS Code on the workspace");
 		Check.True(editor.UseShellExecute, "A PATH shim needs the shell to resolve it.");
+
+		var file = workspace.Write("workspace\\src\\editor file.cs", "class Fixture {}");
+		var defaultEditor = ExternalTools.BuildDefaultEditor(file);
+		Check.Equal(file, defaultEditor.FileName, "Give a file to its registered application");
+		Check.Equal("open", defaultEditor.Verb, "Use the registered open verb");
+		Check.True(defaultEditor.UseShellExecute, "Let Windows resolve the registered file application.");
+
+		var vsCodeFile = ExternalTools.BuildVsCodeFile(file);
+		Check.Equal("code", vsCodeFile.FileName, "Use the VS Code launcher as the file fallback");
+		Check.Equal($"\"{file}\"", vsCodeFile.Arguments, "Give the fallback the exact file path");
+		Check.True(vsCodeFile.UseShellExecute, "Let the shell resolve the VS Code launcher.");
+
+		var launches = new List<ProcessStartInfo>();
+		ExternalTools.OpenFile(file, startInfo =>
+		{
+			launches.Add(startInfo);
+			if (launches.Count == 1)
+				throw new System.ComponentModel.Win32Exception(1155);
+		});
+		Check.Equal(2, launches.Count, "Retry a file exactly once when Windows has no association");
+		Check.Equal(file, launches[0].FileName, "Try the registered application first");
+		Check.Equal("code", launches[1].FileName, "Fall back to VS Code when no application is registered");
 	}
 
 	private static void CheckWorkspaceReadme()

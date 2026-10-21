@@ -1,3 +1,4 @@
+using System.ComponentModel;
 using System.Diagnostics;
 using System.IO;
 using System.Text;
@@ -695,20 +696,7 @@ public partial class MainWindow : TurbolandWindow
 		{
 			// Message names match the renderer's postPathMessage() calls.
 			case "openPath":
-				// Try to open the file in the default editor
-				try
-				{
-					var startInfo = new ProcessStartInfo
-					{
-						FileName = path,
-						UseShellExecute = true,
-					};
-					Process.Start(startInfo);
-				}
-				catch
-				{
-					// Best-effort — file may not exist
-				}
+				OpenFileInEditor(path);
 				break;
 
 			case "openUri":
@@ -740,6 +728,22 @@ public partial class MainWindow : TurbolandWindow
 					// Best-effort
 				}
 				break;
+		}
+	}
+
+	private void OpenFileInEditor(string path)
+	{
+		try
+		{
+			ExternalTools.OpenFile(path, _launchExternal);
+		}
+		catch (Exception ex) when (ex is Win32Exception or InvalidOperationException
+			or ArgumentException or NotSupportedException or IOException
+			or UnauthorizedAccessException or System.Security.SecurityException)
+		{
+			MessageDialog.Ok(this,
+				$"Could not open this file:\r\n{path}\r\n\r\n{ex.Message}",
+				"Open File");
 		}
 	}
 

@@ -163,7 +163,8 @@ internal static class NoticeFormatter
 	/// listing two hundred files is a wall, not a summary; the rest are
 	/// reachable through the review link.
 	/// </summary>
-	public static (string Text, string Rendered) Changes(IReadOnlyList<WorkspaceChange> changes, int shown = 10)
+	public static (string Text, string Rendered) Changes(
+		IReadOnlyList<WorkspaceChange> changes, ChangeAnchor anchor, int shown = 10)
 	{
 		var visible = changes.Count <= shown ? changes : changes.Take(shown).ToList();
 		var title = "Changes (" + changes.Count + ")";
@@ -174,7 +175,8 @@ internal static class NoticeFormatter
 		foreach (var change in visible)
 		{
 			text.Append("\r\n").Append(change.Mark).Append(' ').Append(change.Path);
-			var link = "kp-act:" + Uri.EscapeDataString("diff|" + change.Path);
+			var link = "kp-path:" + Uri.EscapeDataString(
+				WorkspaceChanges.FullPath(anchor, change.Path));
 			rendered.Append("<div class=\"kp-change-row kp-change-").Append(change.Kind).Append("\">")
 				.Append("<span class=\"kp-change-mark\">").Append(Escape(change.Mark)).Append("</span>")
 				.Append("<a class=\"kp-change-path\" href=\"").Append(link).Append("\">")

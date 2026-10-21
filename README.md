@@ -29,6 +29,8 @@ Start a session with **Session -> Begin Session**. Choose a workspace, provider,
 
 TurboPilot displays streamed text in **Raw** and **Rendered** tabs. Rendered output supports Markdown, Mermaid diagrams, links, and local image previews. Questions and permission requests appear as reply cards; answer with a choice number, choice text, or the offered freeform response.
 
+Clicking a rendered file link opens it with the operating system's registered application. If no application is registered for that file type, TurboPilot opens it in Visual Studio Code.
+
 ## Workspace tools
 
 The **Tools** menu opens programs in the active workspace:
