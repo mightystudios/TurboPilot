@@ -256,6 +256,7 @@ def advance_phase(
     is_rework = instructions is not None
     with _exclusive_lock(state_file.parent):
         state = _load_state(state_file)
+        retrying_rework = is_rework and _is_retryable_rework_failure(state)
         if state["pendingReplacement"] is not None:
             process_id = _positive_int_or_none(state.get("processId"))
             if process_id is None or not checker(process_id):
@@ -272,19 +273,20 @@ def advance_phase(
             return _state_response(state_file, state)
         if state["phaseState"] == "closing":
             return _state_response(state_file, state, reused=True)
-        if state["phaseState"] not in {"completed", "closed"}:
+        if not retrying_rework and state["phaseState"] not in {"completed", "closed"}:
             raise RunnerError("the active phase must have a validated result before advance")
 
-        result_path = Path(state["activeResultPath"]).resolve()
-        result = _load_object(result_path, "active phase result")
-        _validate_result(result, require_completed_at=True)
-        if (
-            result["roadmapId"] != state["roadmapId"]
-            or result["phaseId"] != state["activePhaseId"]
-        ):
-            raise RunnerError("stored phase result does not match orchestration state")
-        if is_rework:
-            _archive_phase_result(state, result)
+        if not retrying_rework:
+            result_path = Path(state["activeResultPath"]).resolve()
+            result = _load_object(result_path, "active phase result")
+            _validate_result(result, require_completed_at=True)
+            if (
+                result["roadmapId"] != state["roadmapId"]
+                or result["phaseId"] != state["activePhaseId"]
+            ):
+                raise RunnerError("stored phase result does not match orchestration state")
+            if is_rework:
+                _archive_phase_result(state, result)
         manifest_path = Path(state["manifestPath"]).resolve()
         manifest = _load_object(manifest_path, "phase manifest")
         _validate_manifest(manifest)
@@ -327,7 +329,9 @@ def advance_phase(
             _activate_launch(state, launch, "starting")
             state["progress"] = _progress(
                 None,
-                "Previous process ended; launching the successor in a new process.",
+                "Previous process ended; launching the corrective session in a new process."
+                if is_rework
+                else "Previous process ended; launching the successor in a new process.",
             )
             atomic_write_json(state_file, state)
             control_path = Path(state["controlPath"])
@@ -639,6 +643,18 @@ def _archive_phase_result(state: Mapping[str, Any], result: Mapping[str, Any]) -
     )
     atomic_write_json(archive_path, result)
     return archive_path
+
+
+def _is_retryable_rework_failure(state: Mapping[str, Any]) -> bool:
+    progress = state.get("progress")
+    message = progress.get("message") if isinstance(progress, dict) else None
+    return (
+        state["phaseState"] == "failed"
+        and state["pendingReplacement"] is None
+        and state["activePhaseId"] not in state["completedPhases"]
+        and isinstance(message, str)
+        and message.startswith("TurboPilot replacement failed:")
+    )
 
 
 def _request_close(state: dict[str, Any], disposition: str) -> None:

@@ -422,6 +422,56 @@ class PhaseRunnerTests(unittest.TestCase):
         self.assertEqual(promoted["phaseState"], "running")
         self.assertEqual(superseding["summary"], "Phase 01 passed after correction.")
 
+    def test_rework_retries_a_failed_replacement_without_a_result(self) -> None:
+        response = self.start()
+        self.complete(response)
+        rework_phase(
+            response["statePath"],
+            "Correct the first review finding.",
+            timeout=0,
+            process_checker=lambda process_id: True,
+        )
+        initial = state_from(response)
+        pending = initial["pendingReplacement"]
+        write_session_status(
+            Path(initial["activeRequestPath"]),
+            state="idle",
+            command_id=pending["commandId"],
+            command_state="failed",
+        )
+        inspect_orchestration(
+            response["statePath"],
+            process_checker=lambda process_id: True,
+        )
+
+        retried = rework_phase(
+            response["statePath"],
+            "Correct the replacement failure after reauthentication.",
+            timeout=0,
+            process_checker=lambda process_id: True,
+        )
+
+        state = state_from(response)
+        retry = state["pendingReplacement"]
+        request = json.loads(Path(retry["requestPath"]).read_text(encoding="ascii"))
+        archive_directory = (
+            self.root
+            / ".mighty-ai-runs"
+            / "runner-roadmap"
+            / "results"
+            / "superseded"
+        )
+
+        self.assertEqual(retried["phaseState"], "replacing")
+        self.assertEqual(state["completedPhases"], [])
+        self.assertEqual(retry["fromPhaseId"], "01")
+        self.assertEqual(retry["toPhaseId"], "01")
+        self.assertEqual(len(list(archive_directory.glob("phase-01-*.json"))), 1)
+        self.assertIn(
+            "Correct the replacement failure after reauthentication.",
+            request["initialPrompt"],
+        )
+
     def test_rework_recovers_same_phase_after_the_process_exits(self) -> None:
         response = self.start()
         self.complete(response)
