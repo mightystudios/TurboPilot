@@ -16,9 +16,9 @@ namespace TurboPilot.Dialogs;
 /// Session settings dialog: replaces the former New Session folder picker
 /// with the full setup surface. The user picks the workspace folder and the
 /// model hosting service (Copilot CLI or a BYOK OpenAI-compatible server),
-/// queries the service for its models, and chooses the model, reasoning
-/// effort and session mode. Permissions and Customization dialogs open from
-/// here, and Begin Session drives the session lifecycle.
+/// queries the service for its models, and chooses the model, context tier,
+/// reasoning effort and session mode. Permissions and Customization dialogs
+/// open from here, and Begin Session drives the session lifecycle.
 ///
 /// The dialog only queries services; actually starting an AI session is the
 /// caller's job once Begin Session returns true. Cancel (or the close
@@ -55,6 +55,9 @@ public partial class SettingsDialog : TurbolandFloatingDialog
 
 	/// <summary>Selected model id.</summary>
 	public string SelectedModel { get; private set; } = "";
+
+	/// <summary>Selected context tier (empty when the provider exposes no tier choice).</summary>
+	public string SelectedContextTier { get; private set; } = "";
 
 	/// <summary>Selected reasoning effort (empty when not applicable).</summary>
 	public string SelectedEffort { get; private set; } = "";
@@ -147,6 +150,10 @@ public partial class SettingsDialog : TurbolandFloatingDialog
 		// Every control that feeds BuildOptions has to repaint the caption,
 		// or the button can still read "OK" after a choice that restarts.
 		comboMode.SelectionChanged += (_, _) => UpdateBeginCaption();
+		comboContextTier.SelectionChanged += (_, _) =>
+		{
+			if (!_suppressEvents) UpdateBeginCaption();
+		};
 		comboEffort.SelectionChanged += (_, _) => UpdateBeginCaption();
 		checkApplyInstructions.Click += (_, _) => UpdateBeginCaption();
 		checkPreloadSkills.Click += (_, _) => UpdateBeginCaption();
@@ -237,8 +244,10 @@ public partial class SettingsDialog : TurbolandFloatingDialog
 
 		_models = Array.Empty<AvailableModel>();
 		SetComboItems(comboModel, Array.Empty<string>());
+		SetComboItems(comboContextTier, Array.Empty<string>());
 		SetComboItems(comboEffort, Array.Empty<string>());
-		textContextWindow.Text = "-";
+		labelContextTier.IsEnabled = false;
+		comboContextTier.IsEnabled = false;
 
 		string? endpoint = null;
 		if (IsByok)
@@ -324,7 +333,9 @@ public partial class SettingsDialog : TurbolandFloatingDialog
 		var index = comboModel.SelectedIndex;
 		if (index < 0 || index >= _models.Count)
 		{
-			textContextWindow.Text = "-";
+			SetComboItems(comboContextTier, Array.Empty<string>());
+			labelContextTier.IsEnabled = false;
+			comboContextTier.IsEnabled = false;
 			SetComboItems(comboEffort, Array.Empty<string>());
 			labelEffort.IsEnabled = false;
 			comboEffort.IsEnabled = false;
@@ -332,9 +343,17 @@ public partial class SettingsDialog : TurbolandFloatingDialog
 		}
 
 		var model = _models[index];
-		textContextWindow.Text = model.ContextWindowTokens > 0
-			? AvailableModel.FormatTokensShort(model.ContextWindowTokens) + " tokens"
-			: "not reported";
+		var contextTiers = ContextTiersFor(model);
+		SetComboItems(comboContextTier, contextTiers.Select(tier => tier.DisplayLabel));
+		if (contextTiers.Count > 0)
+		{
+			comboContextTier.SelectedIndex = Enumerable.Range(0, contextTiers.Count)
+				.OrderByDescending(tierIndex => contextTiers[tierIndex].ContextWindowTokens)
+				.ThenByDescending(tierIndex => contextTiers[tierIndex].Id == AvailableContextTier.LongContextId)
+				.First();
+		}
+		labelContextTier.IsEnabled = contextTiers.Count > 0;
+		comboContextTier.IsEnabled = contextTiers.Count > 1;
 
 		if (model.SupportsReasoningEffort && model.ReasoningEfforts.Count > 0)
 		{
@@ -445,9 +464,16 @@ public partial class SettingsDialog : TurbolandFloatingDialog
 	{
 		var modelIndex = comboModel.SelectedIndex;
 		var hasModel = modelIndex >= 0 && modelIndex < _models.Count;
+		var model = hasModel ? _models[modelIndex] : null;
+		var contextTiers = model is null ? [] : ContextTiersFor(model);
+		var contextTierIndex = comboContextTier.SelectedIndex;
+		var contextTier = contextTierIndex >= 0 && contextTierIndex < contextTiers.Count
+			? contextTiers[contextTierIndex]
+			: model?.LargestContextTier;
 		return SessionOptionsFactory.Create(
 			workspace,
-			hasModel ? _models[modelIndex] : null,
+			model,
+			contextTier,
 			comboEffort.SelectedItem as string,
 			comboMode.SelectedItem as string ?? "Standard",
 			IsByok,
@@ -515,6 +541,7 @@ public partial class SettingsDialog : TurbolandFloatingDialog
 		ByokEndpoint = next.ByokEndpoint;
 		ByokApiKey = next.ByokApiKey;
 		SelectedModel = next.Model;
+		SelectedContextTier = next.ContextTier;
 		SelectedContextWindowTokens = next.ContextWindowTokens;
 		SelectedEffort = next.ReasoningEffort ?? "";
 		SelectedMode = next.Mode;
@@ -555,6 +582,7 @@ public partial class SettingsDialog : TurbolandFloatingDialog
 			settings.ByokEndpoint = endpoint;
 		settings.ByokApiKey = textBoxApiKey.Text.Trim();
 		settings.SelectedModel = SelectedModel;
+		settings.SelectedContextTier = SelectedContextTier;
 		settings.SelectedEffort = SelectedEffort;
 		settings.SelectedMode = SelectedMode;
 		settings.ApplyInstructions = ApplyInstructions;
@@ -586,6 +614,11 @@ public partial class SettingsDialog : TurbolandFloatingDialog
 		combo.SelectedIndex = -1;
 		_suppressEvents = false;
 	}
+
+	private static IReadOnlyList<AvailableContextTier> ContextTiersFor(AvailableModel model) =>
+		model.ContextTiers.Count > 0
+			? model.ContextTiers
+			: ModelService.BuildContextTiers(model.ContextWindowTokens);
 
 	/// <summary>
 	/// Composes host, port, and path into an absolute base URL. Forgiving of

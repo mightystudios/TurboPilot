@@ -32,13 +32,19 @@ public static class SessionDetails
 		Field(sb, "Id", sessionId ?? "none");
 		Field(sb, "Workspace", options.WorkspaceFolder ?? "none");
 		Field(sb, "Model", modelLabel is { Length: > 0 } ? modelLabel : Or(options.Model, "default"));
+		Field(sb, "Context tier", options.ContextTier switch
+		{
+			AvailableContextTier.DefaultId => "default",
+			AvailableContextTier.LongContextId => "long",
+			_ => "provider default",
+		});
+		Field(sb, "Context", options.ContextWindowTokens > 0
+			? options.ContextWindowTokens.ToString("N0") + " tokens" : "not reported");
 		Field(sb, "Reasoning", Or(options.ReasoningEffort, "default"));
 		Field(sb, "Mode", options.Mode);
 		if (options.UseByok)
 		{
 			Field(sb, "Provider", Or(options.ByokEndpoint, "not set"));
-			Field(sb, "Context", options.ContextWindowTokens > 0
-				? options.ContextWindowTokens.ToString("N0") + " tokens" : "provider default");
 		}
 		Field(sb, "File links", options.LinkFiles ? "on" : "off");
 

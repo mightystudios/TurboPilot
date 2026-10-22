@@ -4,6 +4,20 @@ using GitHub.Copilot;
 
 namespace TurboPilot.Ai;
 
+public sealed record AvailableContextTier
+{
+	public const string DefaultId = "default";
+	public const string LongContextId = "long_context";
+
+	public required string Id { get; init; }
+	public required string Name { get; init; }
+	public int ContextWindowTokens { get; init; }
+
+	public string DisplayLabel => ContextWindowTokens > 0
+		? $"{Name} - {AvailableModel.FormatTokensShort(ContextWindowTokens)}"
+		: Name;
+}
+
 /// <summary>
 /// One model advertised by a hosting service, with the option data the
 /// Settings dialog needs: its context window and, where supported, the
@@ -18,19 +32,25 @@ public sealed class AvailableModel
 	/// <summary>Prompt/context window in tokens; 0 when the service reports none.</summary>
 	public int ContextWindowTokens { get; init; }
 
+	public IReadOnlyList<AvailableContextTier> ContextTiers { get; init; } = Array.Empty<AvailableContextTier>();
+
 	public bool SupportsReasoningEffort { get; init; }
 
 	public IReadOnlyList<string> ReasoningEfforts { get; init; } = Array.Empty<string>();
 
 	public string? DefaultReasoningEffort { get; init; }
 
-	/// <summary>Combo label: model name plus a compact context window, e.g. "gpt-5 (128K)".</summary>
+	public AvailableContextTier? LargestContextTier => ContextTiers
+		.OrderByDescending(tier => tier.ContextWindowTokens)
+		.ThenByDescending(tier => tier.Id == AvailableContextTier.LongContextId)
+		.FirstOrDefault();
+
+	/// <summary>Combo label containing only model identity; context is selected separately.</summary>
 	public string DisplayLabel
 	{
 		get
 		{
-			var label = string.IsNullOrWhiteSpace(Name) || Name == Id ? Id : $"{Name} ({Id})";
-			return ContextWindowTokens > 0 ? $"{label} - {FormatTokensShort(ContextWindowTokens)}" : label;
+			return string.IsNullOrWhiteSpace(Name) || Name == Id ? Id : $"{Name} ({Id})";
 		}
 	}
 
@@ -102,16 +122,14 @@ public static class ModelService
 			{
 				if (string.IsNullOrEmpty(m.Id)) continue;
 
-				var limits = m.Capabilities?.Limits;
-				var ctx = limits is null
-					? 0
-					: limits.MaxPromptTokens ?? (limits.MaxContextWindowTokens > 0 ? limits.MaxContextWindowTokens : 0);
+				var contextTiers = ContextTiersFor(m);
 
 				result.Add(new AvailableModel
 				{
 					Id = m.Id,
 					Name = string.IsNullOrEmpty(m.Name) ? m.Id : m.Name,
-					ContextWindowTokens = ctx,
+					ContextWindowTokens = contextTiers.Max(tier => tier.ContextWindowTokens),
+					ContextTiers = contextTiers,
 					SupportsReasoningEffort = m.Capabilities?.Supports?.ReasoningEffort == true,
 					ReasoningEfforts = m.SupportedReasoningEfforts is { Count: > 0 } efforts
 						? efforts.ToList()
@@ -195,6 +213,7 @@ public static class ModelService
 					Id = id,
 					Name = id,
 					ContextWindowTokens = ctx,
+					ContextTiers = BuildContextTiers(ctx),
 				});
 			}
 		}
@@ -204,6 +223,63 @@ public static class ModelService
 		}
 		return result;
 	}
+
+	internal static IReadOnlyList<AvailableContextTier> ContextTiersFor(ModelInfo model)
+	{
+		var limits = model.Capabilities?.Limits;
+		var advertisedContext = limits is null
+			? 0
+			: limits.MaxPromptTokens ?? (limits.MaxContextWindowTokens > 0 ? limits.MaxContextWindowTokens : 0);
+#pragma warning disable GHCP001
+		return BuildContextTiers(
+			advertisedContext,
+			model.Billing?.TokenPrices?.MaxPromptTokens,
+			model.Billing?.TokenPrices?.LongContext?.MaxPromptTokens);
+#pragma warning restore GHCP001
+	}
+
+	internal static IReadOnlyList<AvailableContextTier> BuildContextTiers(
+		int advertisedContextWindowTokens,
+		long? defaultPromptTokens = null,
+		long? longContextPromptTokens = null)
+	{
+		var defaultTokens = TokenCount(defaultPromptTokens);
+		var longTokens = TokenCount(longContextPromptTokens);
+		if (longTokens > 0 && longTokens != defaultTokens)
+		{
+			var tiers = new List<AvailableContextTier>(2);
+			if (defaultTokens > 0)
+			{
+				tiers.Add(new AvailableContextTier
+				{
+					Id = AvailableContextTier.DefaultId,
+					Name = "Default",
+					ContextWindowTokens = defaultTokens,
+				});
+			}
+			tiers.Add(new AvailableContextTier
+			{
+				Id = AvailableContextTier.LongContextId,
+				Name = "Long",
+				ContextWindowTokens = longTokens,
+			});
+			return tiers;
+		}
+
+		var fixedTokens = Math.Max(advertisedContextWindowTokens, Math.Max(defaultTokens, longTokens));
+		return
+		[
+			new AvailableContextTier
+			{
+				Id = "",
+				Name = "Default",
+				ContextWindowTokens = fixedTokens,
+			},
+		];
+	}
+
+	private static int TokenCount(long? value) =>
+		value is > 0 ? (int)Math.Min(value.Value, int.MaxValue) : 0;
 
 	// Context-window field names seen across Lemonade, llama.cpp, vLLM and
 	// Ollama-compatible endpoints, most specific first.

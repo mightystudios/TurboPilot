@@ -84,6 +84,9 @@ internal static class SessionFeatureChecks
 		Check.Equal(SessionChange.None, SessionChanges.Classify(options, options), "Unchanged settings change nothing");
 		Check.Equal(SessionChange.Fresh, SessionChanges.Classify(options, options with { WorkspaceFolder = workspace.Root }), "Another workspace starts fresh");
 		Check.Equal(SessionChange.Live, SessionChanges.Classify(options, options with { Model = "test-model-two" }), "Switch the model live");
+		Check.Equal(SessionChange.Live, SessionChanges.Classify(options with { UseByok = false },
+			options with { UseByok = false, ContextTier = AvailableContextTier.LongContextId, ContextWindowTokens = 922000 }),
+			"Change a Copilot context tier live");
 		Check.Equal(SessionChange.Live, SessionChanges.Classify(options, options with { ReasoningEffort = "low" }), "Change the effort live");
 		Check.Equal(SessionChange.Live, SessionChanges.Classify(options, options with { Mode = "Plan" }), "Change a built-in mode live");
 		Check.Equal(SessionChange.Live, SessionChanges.Classify(options, options with { LinkFiles = false }), "Toggle file links live");

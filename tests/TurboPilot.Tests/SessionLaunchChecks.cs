@@ -433,6 +433,7 @@ internal static class SessionLaunchChecks
 			workspace.Workspace, "Standard", library, settings);
 		Check.True(options.UseByok
 			&& options.Model == "test-model"
+			&& options.ContextTier == ""
 			&& options.ContextWindowTokens == 32768
 			&& options.ReasoningEffort == ""
 			&& options.ApplyInstructions

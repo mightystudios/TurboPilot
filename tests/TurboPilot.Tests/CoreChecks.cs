@@ -21,6 +21,7 @@ internal static class CoreChecks
 {
 	public static async Task RunAsync()
 	{
+		CheckContextTiers();
 		CheckConfiguration();
 		CheckBundledCustomizationDiscovery();
 		CheckCustomizationDiscovery();
@@ -43,6 +44,34 @@ internal static class CoreChecks
 		await CheckToolRowsAsync();
 		CheckHistoryAndStatus();
 		Console.WriteLine("PASS configuration, history storage, questions, streaming events, tool rows, usage, prompt navigation, and external tools");
+	}
+
+	private static void CheckContextTiers()
+	{
+		var tiers = ModelService.BuildContextTiers(922000, 272000, 922000);
+		Check.Equal(2, tiers.Count, "Expose default and long context as separate options");
+		Check.True(tiers[0].Id == AvailableContextTier.DefaultId
+			&& tiers[0].ContextWindowTokens == 272000
+			&& tiers[1].Id == AvailableContextTier.LongContextId
+			&& tiers[1].ContextWindowTokens == 922000,
+			"Use the tier-specific prompt budgets advertised by the service.");
+
+		var model = new AvailableModel
+		{
+			Id = "gpt-5.6-terra",
+			Name = "GPT-5.6 Terra",
+			ContextWindowTokens = 922000,
+			ContextTiers = tiers,
+		};
+		Check.Equal("GPT-5.6 Terra (gpt-5.6-terra)", model.DisplayLabel,
+			"Keep context size out of the model name.");
+		Check.Equal(AvailableContextTier.LongContextId, model.LargestContextTier!.Id,
+			"Choose the largest advertised context tier by default.");
+
+		var fixedTier = ModelService.BuildContextTiers(32768);
+		Check.Equal(1, fixedTier.Count, "A fixed-context provider exposes one option");
+		Check.True(fixedTier[0].Id.Length == 0 && fixedTier[0].ContextWindowTokens == 32768,
+			"Do not send an SDK context tier for a provider with no tier choice.");
 	}
 
 	private static void CheckBundledCustomizationDiscovery()
@@ -745,6 +774,8 @@ internal static class CoreChecks
 		{
 			WorkspaceFolder = @"C:\work",
 			Model = "a-model",
+			ContextTier = AvailableContextTier.LongContextId,
+			ContextWindowTokens = 922000,
 			Mode = "duck",
 			Customizations = library,
 		};
@@ -752,6 +783,9 @@ internal static class CoreChecks
 		var text = SessionDetails.Describe(options, "session-123", @"C:\app\turbopilot.instructions.md");
 		Check.True(text.Contains("session-123") && text.Contains(@"C:\work"),
 			"The listing must name the session and the workspace");
+		Check.True(text.Contains("Context tier") && text.Contains("long")
+			&& text.Contains("922,000 tokens"),
+			"The listing must name the selected context tier and its budget.");
 		Check.True(text.Contains("house-style") && text.Contains(@"C:\kit\a.instructions.md"),
 			"An instruction must be named with the file it came from");
 		Check.True(text.Contains("pdf") && !text.Contains("unused"),
@@ -786,6 +820,7 @@ internal static class CoreChecks
 		{
 			WorkspaceFolder = workspace.Workspace,
 			Model = "test-model",
+			ContextTier = AvailableContextTier.LongContextId,
 			ReasoningEffort = "high",
 			Mode = "writer.agent",
 			Customizations = library,
@@ -809,6 +844,7 @@ internal static class CoreChecks
 		Check.Equal(0, config.CustomAgents[0].Tools!.Count, "Preserve an explicit empty tool allowlist");
 		Check.Equal(1, config.CustomAgents[0].Skills!.Count, "Agents cannot preload disabled skills");
 		Check.Equal("high", config.ReasoningEffort, "Apply reasoning effort");
+		Check.Equal(ContextTier.LongContext, config.ContextTier, "Apply the selected context tier");
 		Check.Equal(1, config.McpServers!.Count, "Only enabled servers may be started");
 		Check.Equal("*", config.McpServers["enabled"].Tools!.Single(), "Register all tools explicitly when no server filter is supplied");
 		Check.Equal(0, McpConfig.ReadServerConfiguration(serverFile, "no-tools").Tools!.Count, "Preserve an explicit empty server tool filter");
@@ -831,6 +867,7 @@ internal static class CoreChecks
 		Check.Equal("http://127.0.0.1:5001/v1", provider.Provider!.BaseUrl, "Use the selected endpoint");
 		Check.Equal("fixture-key", provider.Provider.ApiKey, "Use the selected credential only for the provider");
 		Check.True(provider.Provider.MaxPromptTokens == 32768, "Apply the selected context limit.");
+		Check.True(provider.ContextTier is null, "A BYOK provider uses its numeric limit, not a Copilot context tier");
 		var malformed = workspace.Write("malformed.md", "---\nname: [broken\n---\nbody");
 		Check.Throws<YamlDotNet.Core.YamlException>(() => FrontMatter.ReadDocument(malformed));
 	}

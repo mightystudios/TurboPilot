@@ -7,6 +7,7 @@ public sealed record ChatSessionOptions
 {
 	public string? WorkspaceFolder { get; init; }
 	public string Model { get; init; } = "";
+	public string ContextTier { get; init; } = "";
 	public string? ReasoningEffort { get; init; }
 	public string Mode { get; init; } = "Standard";
 	public int ContextWindowTokens { get; init; }

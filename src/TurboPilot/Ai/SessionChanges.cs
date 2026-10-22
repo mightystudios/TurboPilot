@@ -8,7 +8,7 @@ public enum SessionChange
 	None,
 	// A new session without carried context: no running session, or another workspace.
 	Fresh,
-	// Model, reasoning effort, built-in mode, and file linking change on the running session.
+	// Model, context tier, reasoning effort, built-in mode, and file linking change on the running session.
 	Live,
 	// A setting fixed when the session was created changed; the replacement can carry a hand-off.
 	Restart,
@@ -34,7 +34,8 @@ public static class SessionChanges
 			|| (current.Mode != next.Mode && !(IsBuiltInMode(current.Mode) && IsBuiltInMode(next.Mode)))
 			|| (current.UseByok && current.ContextWindowTokens != next.ContextWindowTokens))
 			return SessionChange.Restart;
-		return current.Model != next.Model || (current.ReasoningEffort ?? "") != (next.ReasoningEffort ?? "")
+		return current.Model != next.Model || (!next.UseByok && current.ContextTier != next.ContextTier)
+			|| (current.ReasoningEffort ?? "") != (next.ReasoningEffort ?? "")
 			|| current.Mode != next.Mode || current.LinkFiles != next.LinkFiles
 			|| current.ContextWindowTokens != next.ContextWindowTokens
 			? SessionChange.Live : SessionChange.None;

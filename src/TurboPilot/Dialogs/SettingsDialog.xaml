@@ -6,180 +6,182 @@
 	Title="SESSION SETTINGS"
 	Width="920" Height="430" MinWidth="920" MinHeight="430">
 
-	<!-- Session settings: workspace folder, model service selection, the
+    <!-- Session settings: workspace folder, model service selection, the
 	options read back from the service, and the toggles that shape how a
 	session is assembled. The floating dialog sizes to its content, so
 	Width acts as the minimum width only. -->
-	<StackPanel Margin="10,0,10,10">
+    <StackPanel Margin="10,0,10,10">
 
-		<!-- Workspace folder (from the former New Session dialog). -->
-		<GroupBox Header="Workspace folder" Margin="0,4,0,0">
-			<Grid>
-				<Grid.ColumnDefinitions>
-					<ColumnDefinition Width="*"/>
-					<ColumnDefinition Width="Auto"/>
-				</Grid.ColumnDefinitions>
-				<TextBox x:Name="textBoxWorkspacePath" Grid.Column="0"
+        <!-- Workspace folder (from the former New Session dialog). -->
+        <GroupBox Header="Workspace folder" Margin="0,4,0,0">
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="Auto"/>
+                </Grid.ColumnDefinitions>
+                <TextBox x:Name="textBoxWorkspacePath" Grid.Column="0"
 						VerticalAlignment="Center"
 						ToolTip="Folder the session works in."/>
-				<Button x:Name="buttonBrowse" Grid.Column="1" Content="Browse..."
+                <Button x:Name="buttonBrowse" Grid.Column="1" Content="Browse..."
 						Margin="8,0,0,0" Click="OnBrowse"/>
-			</Grid>
-		</GroupBox>
+            </Grid>
+        </GroupBox>
 
-		<!-- Which hosting service backs the session. -->
-		<GroupBox Header="Model service" Margin="0,10,0,0">
-			<StackPanel>
-				<StackPanel Orientation="Horizontal">
-					<RadioButton x:Name="radioCopilot" Content="Copilot CLI"
+        <!-- Which hosting service backs the session. -->
+        <GroupBox Header="Model service" Margin="0,10,0,0">
+            <StackPanel>
+                <StackPanel Orientation="Horizontal">
+                    <RadioButton x:Name="radioCopilot" Content="Copilot CLI"
 							VerticalAlignment="Center"
 							Checked="OnServiceChanged"
 							ToolTip="GitHub Copilot via the bundled CLI runtime"/>
-					<RadioButton x:Name="radioByok" Content="BYOK (OpenAI-compatible)"
+                    <RadioButton x:Name="radioByok" Content="BYOK (OpenAI-compatible)"
 							Margin="16,0,0,0" VerticalAlignment="Center"
 							Checked="OnServiceChanged"
 							ToolTip="Any OpenAI-compatible server addressed by host and port (Lemonade, Ollama, vLLM, Foundry Local, ...)"/>
-				</StackPanel>
+                </StackPanel>
 
-				<!-- Endpoint parts. Enabled only while BYOK is selected. -->
-				<Grid x:Name="gridByokFields" Margin="0,8,0,0">
-					<Grid.ColumnDefinitions>
-						<ColumnDefinition Width="*"/>
-						<ColumnDefinition Width="72"/>
-						<ColumnDefinition Width="110"/>
-						<ColumnDefinition Width="*"/>
-					</Grid.ColumnDefinitions>
-					<Grid.RowDefinitions>
-						<RowDefinition Height="Auto"/>
-						<RowDefinition Height="Auto"/>
-					</Grid.RowDefinitions>
+                <!-- Endpoint parts. Enabled only while BYOK is selected. -->
+                <Grid x:Name="gridByokFields" Margin="0,8,0,0">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="72"/>
+                        <ColumnDefinition Width="110"/>
+                        <ColumnDefinition Width="*"/>
+                    </Grid.ColumnDefinitions>
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="Auto"/>
+                    </Grid.RowDefinitions>
 
-					<TextBlock Grid.Row="0" Grid.Column="0" Text="Host or IP" Margin="0,0,8,2"/>
-					<TextBlock Grid.Row="0" Grid.Column="1" Text="Port" Margin="0,0,8,2"/>
-					<TextBlock Grid.Row="0" Grid.Column="2" Text="API path" Margin="0,0,8,2"/>
-					<TextBlock Grid.Row="0" Grid.Column="3" Text="API key"/>
+                    <TextBlock Grid.Row="0" Grid.Column="0" Text="Host or IP" Margin="0,0,8,2"/>
+                    <TextBlock Grid.Row="0" Grid.Column="1" Text="Port" Margin="0,0,8,2"/>
+                    <TextBlock Grid.Row="0" Grid.Column="2" Text="API path" Margin="0,0,8,2"/>
+                    <TextBlock Grid.Row="0" Grid.Column="3" Text="API key"/>
 
-					<TextBox x:Name="textBoxHost" Grid.Row="1" Grid.Column="0"
+                    <TextBox x:Name="textBoxHost" Grid.Row="1" Grid.Column="0"
 							Margin="0,0,8,0" VerticalAlignment="Center"
 							TextChanged="OnByokFieldChanged"
 							ToolTip="Server address. A scheme typed here (http:// or https://) is honored; default is http."/>
-					<TextBox x:Name="textBoxPort" Grid.Row="1" Grid.Column="1"
+                    <TextBox x:Name="textBoxPort" Grid.Row="1" Grid.Column="1"
 							Margin="0,0,8,0" VerticalAlignment="Center"
 							TextChanged="OnByokFieldChanged"
 							ToolTip="Server port, e.g. 11434"/>
-					<TextBox x:Name="textBoxPath" Grid.Row="1" Grid.Column="2"
+                    <TextBox x:Name="textBoxPath" Grid.Row="1" Grid.Column="2"
 							Margin="0,0,8,0" VerticalAlignment="Center"
 							TextChanged="OnByokFieldChanged"
 							ToolTip="API base path, e.g. /api/v1 or /v1"/>
-					<TextBox x:Name="textBoxApiKey" Grid.Row="1" Grid.Column="3"
+                    <TextBox x:Name="textBoxApiKey" Grid.Row="1" Grid.Column="3"
 							VerticalAlignment="Center"
 							ToolTip="Bearer token sent with the request. Local servers usually accept anything."/>
-				</Grid>
+                </Grid>
 
-				<TextBlock x:Name="textEndpointPreview" Margin="0,6,0,0"
+                <TextBlock x:Name="textEndpointPreview" Margin="0,6,0,0"
 						TextWrapping="Wrap"/>
-			</StackPanel>
-		</GroupBox>
+            </StackPanel>
+        </GroupBox>
 
-		<!-- Options read back from the selected service. -->
-		<GroupBox Header="Models and options" Margin="0,10,0,0">
-			<StackPanel>
-				<Grid>
-					<Grid.ColumnDefinitions>
-						<ColumnDefinition Width="Auto"/>
-						<ColumnDefinition Width="*"/>
-						<ColumnDefinition Width="Auto"/>
-					</Grid.ColumnDefinitions>
-					<TextBlock Grid.Column="0" Text="Model:" VerticalAlignment="Center"
+        <!-- Options read back from the selected service. -->
+        <GroupBox Header="Models and options" Margin="0,10,0,0">
+            <StackPanel>
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="Auto"/>
+                    </Grid.ColumnDefinitions>
+                    <TextBlock Grid.Column="0" Text="Model:" VerticalAlignment="Center"
 							Margin="0,0,8,0"/>
-					<ComboBox x:Name="comboModel" Grid.Column="1"
+                    <ComboBox x:Name="comboModel" Grid.Column="1"
 							VerticalAlignment="Center"
 							SelectionChanged="OnModelChanged"
-							ToolTip="Models advertised by the service"/>
-					<Button x:Name="buttonQuery" Grid.Column="2" Content="Query Service"
+							ToolTip="Models advertised by the service" Margin="30,0,0,0"/>
+                    <Button x:Name="buttonQuery" Grid.Column="2" Content="Query Service"
 							Margin="8,0,0,0" Width="150" Click="OnQueryService"
 							ToolTip="Contact the service and repopulate the model list"/>
-				</Grid>
+                </Grid>
 
-				<Grid Margin="0,8,0,0" Height="28">
-					<Grid.ColumnDefinitions>
-						<ColumnDefinition Width="Auto"/>
-						<ColumnDefinition Width="*"/>
-						<ColumnDefinition Width="Auto"/>
-						<ColumnDefinition Width="140"/>
-					</Grid.ColumnDefinitions>
-					<TextBlock Grid.Column="0" Text="Context window:" VerticalAlignment="Center"
+                <Grid Margin="0,8,0,0" Height="28">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="43*"/>
+                        <ColumnDefinition Width="653*"/>
+                        <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="140"/>
+                    </Grid.ColumnDefinitions>
+                    <TextBlock x:Name="labelContextTier" Grid.Column="0" Text="Context:" VerticalAlignment="Center"
 							Margin="0,0,8,0"/>
-					<TextBlock x:Name="textContextWindow" Grid.Column="1" Text="-"
-							VerticalAlignment="Center"/>
-					<TextBlock x:Name="labelEffort" Grid.Column="2" Text="Reasoning effort:"
-							VerticalAlignment="Center" Margin="0,0,8,0"/>
-					<ComboBox x:Name="comboEffort" Grid.Column="3"
+                    <ComboBox x:Name="comboContextTier"
 							VerticalAlignment="Center"
-							ToolTip="Reasoning effort levels reported by the service"/>
-				</Grid>
+							ToolTip="Context tiers reported by the service" Margin="10,0,398,0" Grid.Column="1" Grid.ColumnSpan="2"/>
+                    <TextBlock x:Name="labelEffort" Grid.Column="2" Text="Reasoning effort:"
+							VerticalAlignment="Center" Margin="289,0,216,0"/>
+                    <ComboBox x:Name="comboEffort" Grid.Column="2"
+							VerticalAlignment="Center"
+							ToolTip="Reasoning effort levels reported by the service" Margin="454,0,19,0"/>
+                </Grid>
 
-				<TextBlock x:Name="textQueryStatus" Margin="0,8,0,0" TextWrapping="Wrap"
+                <TextBlock x:Name="textQueryStatus" Margin="0,8,0,0" TextWrapping="Wrap"
 						Foreground="{DynamicResource Turboland.Brush.WindowForeground}"/>
-			</StackPanel>
-		</GroupBox>
+            </StackPanel>
+        </GroupBox>
 
-		<!-- How the session is assembled. -->
-		<GroupBox Header="Session" Margin="0,10,0,0">
-			<StackPanel>
-				<Grid>
-					<Grid.ColumnDefinitions>
-						<ColumnDefinition Width="Auto"/>
-						<ColumnDefinition Width="*"/>
-					</Grid.ColumnDefinitions>
-					<TextBlock Grid.Column="0" Text="Mode:" VerticalAlignment="Center"
+        <!-- How the session is assembled. -->
+        <GroupBox Header="Session" Margin="0,10,0,0">
+            <StackPanel>
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="*"/>
+                    </Grid.ColumnDefinitions>
+                    <TextBlock Grid.Column="0" Text="Mode:" VerticalAlignment="Center"
 							Margin="0,0,8,0"/>
-					<ComboBox x:Name="comboMode" Grid.Column="1"
+                    <ComboBox x:Name="comboMode" Grid.Column="1"
 							VerticalAlignment="Center"
 							ToolTip="Built-in modes plus the enabled custom agents from the customization lists"/>
-				</Grid>
+                </Grid>
 
-				<CheckBox x:Name="checkApplyInstructions" Content="Apply Instructions"
+                <CheckBox x:Name="checkApplyInstructions" Content="Apply Instructions"
 						Margin="0,8,0,0"
 						ToolTip="Load enabled customization instructions. TurboPilot's central presentation instructions always apply."/>
-				<CheckBox x:Name="checkPreloadSkills" Content="Preload Skills"
+                <CheckBox x:Name="checkPreloadSkills" Content="Preload Skills"
 						Margin="0,4,0,0"
 						ToolTip="Load enabled skills into the session context"/>
-				<CheckBox x:Name="checkLinkFiles" Content="Link Files in Rendered Output"
+                <CheckBox x:Name="checkLinkFiles" Content="Link Files in Rendered Output"
 						Margin="0,4,0,0"
 						ToolTip="Link mentioned local files and preview referenced images in Rendered output. Raw output is unchanged."/>
-				<CheckBox x:Name="checkPlaySounds" Content="Play Sounds"
+                <CheckBox x:Name="checkPlaySounds" Content="Play Sounds"
 						Margin="0,4,0,0"
 						ToolTip="Chime when a prompt is sent, a turn finishes, and the model needs an answer"/>
-			</StackPanel>
-		</GroupBox>
+            </StackPanel>
+        </GroupBox>
 
-		<!-- Dialog actions. -->
-		<Grid Margin="0,12,0,0">
-			<Grid.ColumnDefinitions>
-				<ColumnDefinition Width="Auto"/>
-				<ColumnDefinition Width="*"/>
-				<ColumnDefinition Width="Auto"/>
-			</Grid.ColumnDefinitions>
+        <!-- Dialog actions. -->
+        <Grid Margin="0,12,0,0">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="Auto"/>
+                <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="Auto"/>
+            </Grid.ColumnDefinitions>
 
-			<StackPanel Grid.Column="0" Orientation="Horizontal" VerticalAlignment="Center">
-				<Button x:Name="buttonPermissions" Content="Permissions..." Width="150"
+            <StackPanel Grid.Column="0" Orientation="Horizontal" VerticalAlignment="Center">
+                <Button x:Name="buttonPermissions" Content="Permissions..." Width="150"
 						Click="OnOpenPermissions" Margin="0,0,8,0"
 						ToolTip="Edit file access permissions for this workspace"/>
-				<Button x:Name="buttonCustomization" Content="Customization..." Width="170"
+                <Button x:Name="buttonCustomization" Content="Customization..." Width="170"
 						Click="OnOpenCustomization"
 						ToolTip="Edit the customization folders and items"/>
-			</StackPanel>
+            </StackPanel>
 
-			<!-- ButtonStripMargin keeps each button's hard shadow off its
+            <!-- ButtonStripMargin keeps each button's hard shadow off its
 			neighbor; the rightmost button needs none. -->
-			<StackPanel Grid.Column="2" Orientation="Horizontal" VerticalAlignment="Center">
-				<Button x:Name="buttonCancel" Content="Cancel" Width="100"
+            <StackPanel Grid.Column="2" Orientation="Horizontal" VerticalAlignment="Center">
+                <Button x:Name="buttonCancel" Content="Cancel" Width="100"
 						IsCancel="True" Click="OnCancel" Margin="0,0,8,0"/>
-				<Button x:Name="buttonBeginSession" Content="Begin Session" Width="160"
+                <Button x:Name="buttonBeginSession" Content="Begin Session" Width="160"
 						IsDefault="True" Click="OnBeginSession"
 						ToolTip="Save these settings and start the session"/>
-			</StackPanel>
-		</Grid>
-	</StackPanel>
+            </StackPanel>
+        </Grid>
+    </StackPanel>
 </ctl:TurbolandFloatingDialog>

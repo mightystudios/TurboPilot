@@ -9,6 +9,7 @@ internal static class SessionOptionsFactory
 	internal static ChatSessionOptions Create(
 		string workspace,
 		AvailableModel? model,
+		AvailableContextTier? contextTier,
 		string? reasoningEffort,
 		string mode,
 		bool useByok,
@@ -22,7 +23,11 @@ internal static class SessionOptionsFactory
 		{
 			WorkspaceFolder = workspace,
 			Model = model?.Id ?? "",
-			ContextWindowTokens = model?.ContextWindowTokens ?? 0,
+			ContextTier = contextTier?.Id ?? "",
+			ContextWindowTokens = contextTier?.ContextWindowTokens
+				?? model?.LargestContextTier?.ContextWindowTokens
+				?? model?.ContextWindowTokens
+				?? 0,
 			ReasoningEffort = reasoningEffort ?? "",
 			Mode = mode,
 			UseByok = useByok,
@@ -70,6 +75,12 @@ internal static class SessionOptionsFactory
 			string.Equals(item.Id, settings.SelectedModel, StringComparison.OrdinalIgnoreCase))
 			?? throw new InvalidOperationException(
 				$"Saved model '{settings.SelectedModel}' is unavailable from the configured provider.");
+		var contextTier = string.IsNullOrWhiteSpace(settings.SelectedContextTier)
+			? model.LargestContextTier
+			: model.ContextTiers.FirstOrDefault(tier =>
+				string.Equals(tier.Id, settings.SelectedContextTier, StringComparison.OrdinalIgnoreCase))
+				?? throw new InvalidOperationException(
+					$"Saved context tier '{settings.SelectedContextTier}' is unavailable for model '{model.Id}'.");
 
 		var reasoningEffort = "";
 		if (model.SupportsReasoningEffort)
@@ -85,6 +96,7 @@ internal static class SessionOptionsFactory
 		return Create(
 			workspace,
 			model,
+			contextTier,
 			reasoningEffort,
 			mode,
 			useByok,

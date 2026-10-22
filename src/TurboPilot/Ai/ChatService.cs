@@ -1647,7 +1647,7 @@ public sealed partial class ChatService : IAsyncDisposable
 		}
 	}
 
-	// Model, reasoning effort, built-in mode, and file linking change on the running session, which
+	// Model, context tier, reasoning effort, built-in mode, and file linking change on the running session, which
 	// keeps its conversation. During a turn the change waits until the turn ends or the next prompt,
 	// rather than joining the runtime's queue, where an interruption would silently discard it.
 	// Returns true when the change is waiting.
@@ -1715,10 +1715,15 @@ public sealed partial class ChatService : IAsyncDisposable
 	private async Task<bool> ApplyChangesAsync(CopilotSession session, ChatSessionOptions next, CancellationToken cancellationToken)
 	{
 		var effort = string.IsNullOrWhiteSpace(next.ReasoningEffort) ? null : next.ReasoningEffort;
+		var contextTier = SessionConfiguration.ToSdkContextTier(next.ContextTier);
 #pragma warning disable GHCP001
-		if (next.Model != _options.Model)
+		if (next.Model != _options.Model || next.ContextTier != _options.ContextTier)
 		{
-			var switched = await session.Rpc.Model.SwitchToAsync(next.Model, reasoningEffort: effort, cancellationToken: cancellationToken).ConfigureAwait(false);
+			var switched = await session.Rpc.Model.SwitchToAsync(
+				next.Model,
+				reasoningEffort: effort,
+				contextTier: contextTier,
+				cancellationToken: cancellationToken).ConfigureAwait(false);
 			if (switched.Deferred == true)
 			{
 				lock (_sync) _pendingChanges = next;
@@ -1736,7 +1741,8 @@ public sealed partial class ChatService : IAsyncDisposable
 			_agentMode = mode;
 			_options = _options with
 			{
-				Model = next.Model, ReasoningEffort = next.ReasoningEffort, Mode = next.Mode,
+				Model = next.Model, ContextTier = next.ContextTier,
+				ReasoningEffort = next.ReasoningEffort, Mode = next.Mode,
 				ContextWindowTokens = next.ContextWindowTokens, LinkFiles = next.LinkFiles,
 			};
 			if (next.ContextWindowTokens > 0)
@@ -2157,8 +2163,16 @@ public sealed partial class ChatService : IAsyncDisposable
 				return models.FirstOrDefault(model => string.Equals(model.Id, _options.Model, StringComparison.OrdinalIgnoreCase))?.ContextWindowTokens ?? 0;
 			}
 			var catalog = await _client.ListModelsAsync(cancellationToken);
-			var limits = catalog.FirstOrDefault(model => string.Equals(model.Id, _options.Model, StringComparison.OrdinalIgnoreCase))?.Capabilities?.Limits;
-			return limits is null ? 0 : TokenCount(limits.MaxPromptTokens ?? limits.MaxContextWindowTokens);
+			var model = catalog.FirstOrDefault(model =>
+				string.Equals(model.Id, _options.Model, StringComparison.OrdinalIgnoreCase));
+			if (model is null)
+				return 0;
+			var tiers = ModelService.ContextTiersFor(model);
+			var selected = string.IsNullOrWhiteSpace(_options.ContextTier)
+				? tiers.OrderByDescending(tier => tier.ContextWindowTokens).FirstOrDefault()
+				: tiers.FirstOrDefault(tier =>
+					string.Equals(tier.Id, _options.ContextTier, StringComparison.OrdinalIgnoreCase));
+			return selected?.ContextWindowTokens ?? 0;
 		}
 		catch (OperationCanceledException) { throw; }
 		catch (Exception ex)

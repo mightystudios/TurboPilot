@@ -1952,6 +1952,7 @@ internal static class UiChecks
 			var combo = Control<ComboBox>(dialog, "comboModel");
 			combo.ItemsSource = new[] { model.DisplayLabel };
 			combo.SelectedIndex = 0;
+			Control<ComboBox>(dialog, "comboMode").SelectedItem = "Standard";
 			return dialog;
 		}
 	}
@@ -1961,11 +1962,23 @@ internal static class UiChecks
 		var suffix = Guid.NewGuid().ToString("N");
 		var firstEfforts = new[] { "low-" + suffix, "high-" + suffix };
 		var secondEfforts = new[] { "low-" + suffix, "medium-" + suffix, "maximum-" + suffix };
+		var firstContextTiers = new[]
+		{
+			new AvailableContextTier { Id = AvailableContextTier.DefaultId, Name = "Default", ContextWindowTokens = 272000 },
+			new AvailableContextTier { Id = AvailableContextTier.LongContextId, Name = "Long", ContextWindowTokens = 922000 },
+		};
+		var secondContextTiers = new[]
+		{
+			new AvailableContextTier { Id = AvailableContextTier.LongContextId, Name = "Long", ContextWindowTokens = 800000 },
+			new AvailableContextTier { Id = AvailableContextTier.DefaultId, Name = "Default", ContextWindowTokens = 200000 },
+		};
 		var models = (IReadOnlyList<AvailableModel>)
 		[
 			new AvailableModel
 			{
 				Id = "reasoning-model-one",
+				ContextWindowTokens = 922000,
+				ContextTiers = firstContextTiers,
 				SupportsReasoningEffort = true,
 				ReasoningEfforts = firstEfforts,
 				DefaultReasoningEffort = firstEfforts[0],
@@ -1973,6 +1986,8 @@ internal static class UiChecks
 			new AvailableModel
 			{
 				Id = "reasoning-model-two",
+				ContextWindowTokens = 800000,
+				ContextTiers = secondContextTiers,
 				SupportsReasoningEffort = true,
 				ReasoningEfforts = secondEfforts,
 				DefaultReasoningEffort = secondEfforts[0],
@@ -1985,26 +2000,42 @@ internal static class UiChecks
 			var comboModel = Control<ComboBox>(dialog, "comboModel");
 			comboModel.ItemsSource = models.Select(model => model.DisplayLabel).ToArray();
 			var comboEffort = Control<ComboBox>(dialog, "comboEffort");
+			var comboContextTier = Control<ComboBox>(dialog, "comboContextTier");
 
 			comboModel.SelectedIndex = 0;
 			Check.Equal(firstEfforts[^1], comboEffort.SelectedItem as string,
 				"Select the highest reasoning effort for the initial model.");
+			Check.Equal(AvailableModel.FormatTokensShort(922000), ContextSize(comboContextTier),
+				"Select the largest context tier for the initial model.");
+			var selected = (ChatSessionOptions)Invoke(dialog, "BuildOptions", workspace.Workspace)!;
+			Check.True(selected.ContextTier == AvailableContextTier.LongContextId
+				&& selected.ContextWindowTokens == 922000,
+				"Build the session options from the selected long context tier.");
 
 			comboEffort.SelectedIndex = 0;
+			comboContextTier.SelectedIndex = 0;
 			comboModel.SelectedIndex = 1;
 			Check.Equal(secondEfforts[^1], comboEffort.SelectedItem as string,
 				"Reset to the highest reasoning effort when changing models.");
+			Check.Equal(AvailableModel.FormatTokensShort(800000), ContextSize(comboContextTier),
+				"Select the largest tier even when it is not the last advertised option.");
 
 			comboEffort.SelectedIndex = 0;
+			comboContextTier.SelectedIndex = 0;
 			comboModel.SelectedIndex = 0;
 			Check.Equal(firstEfforts[^1], comboEffort.SelectedItem as string,
 				"Reset to the highest reasoning effort when returning to a model.");
-			Console.WriteLine("PASS highest reasoning effort selected on model changes");
+			Check.Equal(AvailableModel.FormatTokensShort(922000), ContextSize(comboContextTier),
+				"Reset to the largest context tier when returning to a model.");
+			Console.WriteLine("PASS highest reasoning effort and largest context tier selected on model changes");
 		}
 		finally
 		{
 			dialog.Close();
 		}
+
+		static string ContextSize(ComboBox combo) =>
+			(combo.SelectedItem as string)?.Split(" - ").Last() ?? "";
 	}
 
 	/// <summary>

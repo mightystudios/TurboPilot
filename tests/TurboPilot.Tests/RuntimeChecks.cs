@@ -17,6 +17,7 @@ internal static class RuntimeChecks
 		var model = models.FirstOrDefault(model => model.Id == "gpt-4.1")
 			?? models.FirstOrDefault(model => model.Id == "gpt-5-mini")
 			?? models.First();
+		var contextTier = model.LargestContextTier;
 		await using var chat = new ChatService(workspace.Store);
 		try
 		{
@@ -24,8 +25,9 @@ internal static class RuntimeChecks
 			{
 				WorkspaceFolder = workspace.Workspace,
 				Model = model.Id,
+				ContextTier = contextTier?.Id ?? "",
 				ReasoningEffort = model.DefaultReasoningEffort,
-				ContextWindowTokens = model.ContextWindowTokens,
+				ContextWindowTokens = contextTier?.ContextWindowTokens ?? model.ContextWindowTokens,
 				ApplyInstructions = false,
 				PreloadSkills = false,
 			}).WaitAsync(TimeSpan.FromSeconds(45));

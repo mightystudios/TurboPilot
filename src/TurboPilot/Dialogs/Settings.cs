@@ -45,6 +45,9 @@ public sealed class Settings
 	/// <summary>Model id selected in the Settings dialog, if any.</summary>
 	public string SelectedModel { get; set; } = "";
 
+	/// <summary>Context tier selected in the Settings dialog, if any.</summary>
+	public string SelectedContextTier { get; set; } = "";
+
 	/// <summary>Reasoning effort selected in the Settings dialog, if any.</summary>
 	public string SelectedEffort { get; set; } = "";
 

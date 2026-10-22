@@ -11,6 +11,7 @@ internal static class SessionConfiguration
 	public static void Apply(SessionConfigBase config, ChatSessionOptions options, string? applicationInstructionsPath = null)
 	{
 		config.Model = string.IsNullOrWhiteSpace(options.Model) ? null : options.Model;
+		config.ContextTier = options.UseByok ? null : ToSdkContextTier(options.ContextTier);
 		config.ReasoningEffort = string.IsNullOrWhiteSpace(options.ReasoningEffort) ? null : options.ReasoningEffort;
 		config.WorkingDirectory = options.WorkspaceFolder;
 		config.Streaming = true;
@@ -107,6 +108,14 @@ internal static class SessionConfiguration
 			};
 		}
 	}
+
+	internal static ContextTier? ToSdkContextTier(string? contextTier) => contextTier switch
+	{
+		null or "" => null,
+		AvailableContextTier.DefaultId => ContextTier.Default,
+		AvailableContextTier.LongContextId => ContextTier.LongContext,
+		_ => throw new InvalidOperationException($"Context tier '{contextTier}' is unavailable."),
+	};
 
 	private static CustomAgentConfig ReadAgent(CustomizationItem item, HashSet<string> enabledSkills)
 	{
