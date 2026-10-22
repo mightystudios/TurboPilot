@@ -78,6 +78,18 @@ internal static class RenderingChecks
 			"Escape the requested operation and show it as code.");
 		Check.True(!permissionRendered.Contains("<C:"), "A command can never be read as markup.");
 
+		var workflow = NoticeFormatter.WorkflowPermission(new WorkflowPermissionReview(
+			"release <prod>", "run", "Deploy & verify", ["Build: compile", "Review"],
+			"12.5", "600 seconds", "4", "20", true));
+		Check.True(workflow.Text.Contains("Workflow: release <prod>")
+			&& workflow.Text.Contains("AI credits: 12.5")
+			&& workflow.Text.Contains("1. Build: compile"),
+			"Show the complete workflow review in Raw.");
+		Check.True(workflow.Rendered.Contains("Workflow: release &lt;prod&gt;&#10;Operation: run")
+			&& workflow.Rendered.Contains("Persistent approval: available")
+			&& !workflow.Rendered.Contains("<prod>"),
+			"Show and escape the complete workflow review in Rendered.");
+
 		var (statusText, statusRendered) = NoticeFormatter.Status("error", "MCP <server> failed");
 		Check.Equal("[error] MCP <server> failed", statusText, "Keep the plain status line in the Raw tab");
 		Check.True(statusRendered.Contains("class=\"kp-status kp-status-error\"")

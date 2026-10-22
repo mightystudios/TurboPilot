@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Globalization;
 using System.IO;
 using System.Text;
 using GitHub.Copilot;
@@ -70,8 +71,22 @@ public sealed partial class ChatService : IAsyncDisposable
 	// second entry the reader has to pair up by eye. A call that carries
 	// the agent's answer is shown as that answer, and is held only so
 	// its failure can still be reported.
-	private sealed record ToolRecord(string Name, string Headline, string Body, bool IsReply = false);
+	private sealed class ToolRecord(string name, string headline, string body, bool isReply = false)
+	{
+		public string Name { get; } = name;
+		public string Headline { get; } = headline;
+		public string Body { get; } = body;
+		public bool IsReply { get; } = isReply;
+		public StringBuilder ShellOutput { get; } = new();
+		public SortedDictionary<long, ToolShellChunk> PendingShellOutput { get; } = [];
+		public long NextShellSequence { get; set; }
+		public string? ShellStream { get; set; }
+		public bool ShellOutputTruncated { get; set; }
+	}
+	private sealed record ToolShellChunk(string Stream, string Text);
 	private readonly Dictionary<string, ToolRecord> _toolCalls = [];
+	private const int MaxLiveToolOutputChars = 64 * 1024;
+	private const string LiveToolOutputTruncated = "[... earlier shell output omitted ...]\r\n";
 
 	// Where the workspace stood when the turn began, and when the
 	// session began, so a turn can report what it changed and the whole
@@ -656,6 +671,7 @@ public sealed partial class ChatService : IAsyncDisposable
 			or AssistantMessageDeltaEvent
 			or AssistantMessageEvent
 			or ToolExecutionStartEvent
+			or ToolShellOutputEvent
 			or ToolExecutionCompleteEvent
 			or SessionTodosChangedEvent;
 
@@ -849,7 +865,7 @@ public sealed partial class ChatService : IAsyncDisposable
 	}
 
 #pragma warning disable GHCP001
-	private async Task<GitHub.Copilot.Rpc.PermissionDecision> HandlePermissionRequestAsync(PermissionRequest request, PermissionInvocation invocation)
+	internal async Task<GitHub.Copilot.Rpc.PermissionDecision> HandlePermissionRequestAsync(PermissionRequest request, PermissionInvocation invocation)
 	{
 		var kind = request.Kind ?? "";
 		if (IsPreApproved(request, kind))
@@ -865,7 +881,9 @@ public sealed partial class ChatService : IAsyncDisposable
 		};
 		try
 		{
-			var (text, rendered) = NoticeFormatter.Permission(kind, detail);
+			var (text, rendered) = request is PermissionRequestWorkflow workflow
+				? NoticeFormatter.WorkflowPermission(BuildWorkflowPermissionReview(workflow))
+				: NoticeFormatter.Permission(kind, detail);
 			var response = await AwaitAnswerAsync(text, rendered, ["yes", "no"], allowFreeform: false, isPermission: true);
 			if (response.Answer == "yes")
 				return await ApprovePermissionAsync(request, invocation);
@@ -876,6 +894,33 @@ public sealed partial class ChatService : IAsyncDisposable
 		}
 		return GitHub.Copilot.Rpc.PermissionDecision.Reject(null);
 	}
+
+	private static WorkflowPermissionReview BuildWorkflowPermissionReview(PermissionRequestWorkflow request)
+	{
+		var phases = request.Phases
+			.Select(phase => string.IsNullOrWhiteSpace(phase.Detail)
+				? phase.Title
+				: phase.Title + ": " + phase.Detail)
+			.ToArray();
+		return new WorkflowPermissionReview(
+			string.IsNullOrWhiteSpace(request.Name) ? "(unnamed)" : request.Name,
+			string.IsNullOrWhiteSpace(request.Operation.Value) ? "(unknown)" : request.Operation.Value,
+			string.IsNullOrWhiteSpace(request.Description) ? "(none provided)" : request.Description,
+			phases,
+			FormatWorkflowLimit(request.MaxAiCredits),
+			request.TimeoutSeconds is { } seconds
+				? seconds.ToString("0.###", CultureInfo.InvariantCulture) + " seconds"
+				: "unlimited",
+			FormatWorkflowLimit(request.MaxConcurrentSubagents),
+			FormatWorkflowLimit(request.MaxTotalSubagents),
+			request.CanPersistApproval);
+	}
+
+	private static string FormatWorkflowLimit(double? value) =>
+		value?.ToString("0.###", CultureInfo.InvariantCulture) ?? "unlimited";
+
+	private static string FormatWorkflowLimit(long? value) =>
+		value?.ToString(CultureInfo.InvariantCulture) ?? "unlimited";
 
 	private async Task<GitHub.Copilot.Rpc.PermissionDecision> ApprovePermissionAsync(
 		PermissionRequest request,
@@ -969,6 +1014,9 @@ public sealed partial class ChatService : IAsyncDisposable
 						break;
 					case ToolExecutionStartEvent tool:
 						ShowToolStart(tool.Data);
+						break;
+					case ToolShellOutputEvent output:
+						ShowToolShellOutput(output.Data);
 						break;
 					case ToolExecutionCompleteEvent done:
 						ShowToolComplete(done.Data);
@@ -1181,7 +1229,7 @@ public sealed partial class ChatService : IAsyncDisposable
 		{
 			lock (_sync)
 			{
-				_toolCalls[id] = new ToolRecord(name, string.Empty, string.Empty, IsReply: true);
+				_toolCalls[id] = new ToolRecord(name, string.Empty, string.Empty, isReply: true);
 				ShowReply("reply:" + id, reply);
 			}
 			return;
@@ -1218,6 +1266,64 @@ public sealed partial class ChatService : IAsyncDisposable
 			QueueFormatting(messageId, rendered);
 	}
 
+	/// <summary>Appends ordered shell output to the running tool row.</summary>
+	private void ShowToolShellOutput(ToolShellOutputData data)
+	{
+		var id = "tool:" + data.ToolCallId;
+		var stream = data.Stream is { } source && !string.IsNullOrWhiteSpace(source.Value)
+			? source.Value
+			: "stdout";
+		lock (_sync)
+		{
+			if (!_toolCalls.TryGetValue(id, out var call) || call.IsReply
+				|| data.Sequence < call.NextShellSequence
+				|| !call.PendingShellOutput.TryAdd(data.Sequence,
+					new ToolShellChunk(stream, data.Text)))
+				return;
+
+			var changed = false;
+			while (call.PendingShellOutput.TryGetValue(call.NextShellSequence, out var chunk))
+			{
+				call.PendingShellOutput.Remove(call.NextShellSequence);
+				call.NextShellSequence++;
+				changed |= AppendShellOutput(call, chunk);
+			}
+			if (!changed)
+				return;
+
+			var row = NoticeFormatter.Tool(call.Name, call.Headline, call.Body,
+				outcome: LiveShellOutput(call));
+			ReplaceRendered(id, row.Rendered);
+		}
+	}
+
+	private static bool AppendShellOutput(ToolRecord call, ToolShellChunk chunk)
+	{
+		if (chunk.Text.Length == 0)
+			return false;
+		if (!string.Equals(call.ShellStream, chunk.Stream, StringComparison.OrdinalIgnoreCase))
+		{
+			if (call.ShellOutput.Length > 0 && call.ShellOutput[^1] is not ('\r' or '\n'))
+				call.ShellOutput.Append("\r\n");
+			if (call.ShellOutput.Length > 0 || !string.Equals(chunk.Stream, "stdout", StringComparison.OrdinalIgnoreCase))
+				call.ShellOutput.Append('[').Append(chunk.Stream).Append("]\r\n");
+			call.ShellStream = chunk.Stream;
+		}
+		call.ShellOutput.Append(chunk.Text);
+		if (call.ShellOutput.Length > MaxLiveToolOutputChars)
+		{
+			var remove = call.ShellOutput.Length - MaxLiveToolOutputChars;
+			if (remove < call.ShellOutput.Length && char.IsLowSurrogate(call.ShellOutput[remove]))
+				remove++;
+			call.ShellOutput.Remove(0, remove);
+			call.ShellOutputTruncated = true;
+		}
+		return true;
+	}
+
+	private static string LiveShellOutput(ToolRecord call) =>
+		(call.ShellOutputTruncated ? LiveToolOutputTruncated : "") + call.ShellOutput.ToString();
+
 	/// <summary>
 	/// Finishes the row a tool call opened: marks it done or failed and
 	/// files the output inside it.
@@ -1251,9 +1357,23 @@ public sealed partial class ChatService : IAsyncDisposable
 			return;
 		}
 
+		var liveOutput = LiveShellOutput(started);
 		var rawOutcome = data.Success
 			? data.Result?.Content ?? string.Empty
 			: string.IsNullOrWhiteSpace(data.Error?.Message) ? "Failed." : data.Error!.Message;
+		if (liveOutput.Length > 0)
+		{
+			if (data.Success && string.IsNullOrEmpty(data.Result?.Content))
+			{
+				outcome = liveOutput;
+				rawOutcome = liveOutput;
+			}
+			else if (!data.Success)
+			{
+				outcome = liveOutput.TrimEnd('\r', '\n') + "\r\n\r\n" + outcome;
+				rawOutcome = liveOutput.TrimEnd('\r', '\n') + "\r\n\r\n" + rawOutcome;
+			}
+		}
 		var row = NoticeFormatter.Tool(started.Name, started.Headline, started.Body,
 			data.Success ? "ok" : "failed", outcome);
 		ReplaceRendered(id, row.Rendered);
@@ -1274,8 +1394,14 @@ public sealed partial class ChatService : IAsyncDisposable
 			foreach (var (id, call) in _toolCalls)
 			{
 				if (!call.IsReply)
+				{
+					var outcome = LiveShellOutput(call);
+					if (outcome.Length > 0)
+						outcome = outcome.TrimEnd('\r', '\n') + "\r\n\r\n";
+					outcome += "Stopped before it reported an outcome.";
 					ReplaceRendered(id, NoticeFormatter.Tool(call.Name, call.Headline, call.Body,
-						"stopped", "Stopped before it reported an outcome.").Rendered);
+						"stopped", outcome).Rendered);
+				}
 			}
 			_toolCalls.Clear();
 		}

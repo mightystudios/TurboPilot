@@ -1198,6 +1198,31 @@ internal static class CoreChecks
 		Check.Equal("yes", ChatService.ResolveAnswer("1", ["yes", "no"], false, true).Answer, "Numbered permission approval");
 		Check.Equal("no", ChatService.ResolveAnswer("deny", ["yes", "no"], false, true).Answer, "Permission denial alias");
 		Check.Throws<InvalidOperationException>(() => ChatService.ResolveAnswer("maybe", ["yes", "no"], false, true));
+		var workflow = chat.HandlePermissionRequestAsync(new PermissionRequestWorkflow
+		{
+			ApprovalKey = "workflow:release",
+			CanPersistApproval = true,
+			Description = "Build and review the release.",
+			Name = "release",
+			Operation = new WorkflowPermissionOperation("run"),
+			Phases =
+			[
+				new WorkflowPermissionPhase { Title = "Build", Detail = "Compile and test." },
+				new WorkflowPermissionPhase { Title = "Review" },
+			],
+			MaxAiCredits = 12.5,
+			MaxConcurrentSubagents = 4,
+			MaxTotalSubagents = 20,
+			TimeoutSeconds = 600,
+		}, new());
+		Check.True(chat.Transcript.Contains("Workflow: release")
+			&& chat.Transcript.Contains("Operation: run")
+			&& chat.Transcript.Contains("AI credits: 12.5")
+			&& chat.Transcript.Contains("Active time: 600 seconds")
+			&& chat.Transcript.Contains("1. Build: Compile and test."),
+			"Present workflow identity, phases, and effective limits before approval.");
+		chat.TryAnswerPending("no");
+		await workflow;
 		var plan = chat.HandleExitPlanModeRequestAsync(new ExitPlanModeRequest
 		{
 			Summary = "Implement the plan?", Actions = ["interactive", "autopilot"],
@@ -1247,6 +1272,13 @@ internal static class CoreChecks
 		Check.True(chat.IsWorking, "A deferred timeout must preserve the working state until idle.");
 		chat.HandleSessionEvent(SessionEvent.FromJson("""{"type":"session.idle","data":{}}"""));
 		Check.True(displayed.ToString().Contains("Terminal request timeout"), "Report a deferred timeout once the operation ends without progress.");
+		chat.HandleSessionEvent(SessionEvent.FromJson("""{"type":"assistant.turn_start","data":{"turnId":"turn-3"}}"""));
+		chat.HandleSessionEvent(SessionEvent.FromJson("""{"type":"tool.execution_start","data":{"toolCallId":"shell-progress","toolName":"shell","arguments":{"command":"build"}}}"""));
+		chat.HandleSessionEvent(SessionEvent.FromJson("""{"type":"session.error","data":{"message":"Shell progress timeout","errorType":"timeout","errorCode":"ETIMEDOUT","statusCode":408}}"""));
+		chat.HandleSessionEvent(SessionEvent.FromJson("""{"type":"tool.shell_output","data":{"toolCallId":"shell-progress","sequence":0,"stream":"stdout","text":"still building"}}"""));
+		chat.HandleSessionEvent(SessionEvent.FromJson("""{"type":"session.idle","data":{}}"""));
+		Check.True(!displayed.ToString().Contains("Shell progress timeout"),
+			"Live shell output must count as substantive progress and clear a transient timeout.");
 		chat.HandleSessionEvent(SessionEvent.FromJson("""{"type":"session.mcp_server_status_changed","data":{"serverName":"fixture","status":"failed","error":"Connection refused"}}"""));
 		chat.HandleSessionEvent(SessionEvent.FromJson("""{"type":"session.mcp_servers_loaded","data":{"servers":[{"name":"fixture","status":"failed","error":"Connection refused"}]}}"""));
 		Check.Equal(1, chat.Transcript.Split("Connection refused").Length - 1, "Surface server failures without duplicate notices");
@@ -1271,6 +1303,17 @@ internal static class CoreChecks
 		Send("""{"type":"tool.execution_start","data":{"toolCallId":"c1","toolName":"view","arguments":{"path":"missing.md"}}}""");
 		Send("""{"type":"tool.execution_complete","data":{"toolCallId":"c1","success":false,"error":{"message":"Path does not exist"}}}""");
 		Send("""{"type":"tool.execution_start","data":{"toolCallId":"c2","toolName":"rg","arguments":{"pattern":"TODO"}}}""");
+		Send("""{"type":"tool.execution_start","data":{"toolCallId":"c4","toolName":"shell","arguments":{"command":"build"}}}""");
+		Send("""{"type":"tool.shell_output","data":{"toolCallId":"c4","sequence":1,"stream":"stderr","text":"LIVE-ERR-1"}}""");
+		Check.True(!chat.RenderedTranscript.Contains("LIVE-ERR-1"),
+			"Hold shell output until all earlier sequence numbers arrive.");
+		Send("""{"type":"tool.shell_output","data":{"toolCallId":"c4","sequence":0,"stream":"stdout","text":"LIVE-OUT-0"}}""");
+		Send("""{"type":"tool.shell_output","data":{"toolCallId":"c4","sequence":0,"stream":"stdout","text":"DUPLICATE"}}""");
+		Check.True(chat.RenderedTranscript.Contains("LIVE-OUT-0&#10;[stderr]&#10;LIVE-ERR-1")
+			&& !chat.RenderedTranscript.Contains("DUPLICATE")
+			&& chat.RenderedTranscript.Contains("kp-tool-running"),
+			"Stream ordered stdout and stderr into the running tool row once.");
+		Send("""{"type":"tool.execution_complete","data":{"toolCallId":"c4","success":true,"result":{"content":"FINAL-SHELL-OUTPUT"}}}""");
 		Send("""{"type":"tool.execution_start","data":{"toolCallId":"c3","toolName":"task_complete","arguments":{"summary":"**Finished.** Nothing was left to do."}}}""");
 		Send("""{"type":"tool.execution_complete","data":{"toolCallId":"c3","success":true,"result":{"content":"**Finished.** Nothing was left to do."}}}""");
 		Send("""{"type":"session.idle","data":{}}""");
@@ -1289,6 +1332,10 @@ internal static class CoreChecks
 		Check.True(!rendered.Contains(">task_complete<"), "The finishing tool is not drawn as a row: " + rendered);
 		Check.True(rendered.Contains("<div class=\"kp-tool kp-tool-stopped\">") && !rendered.Contains("kp-tool-running"),
 			"A call that never reported back is stopped once its turn ends: " + rendered);
+		Check.Equal(1, rendered.Split("FINAL-SHELL-OUTPUT").Length - 1,
+			"Completion replaces transient shell chunks with one final outcome");
+		Check.True(!rendered.Contains("LIVE-OUT-0") && !rendered.Contains("LIVE-ERR-1"),
+			"Do not duplicate transient shell output after completion.");
 		Check.Equal(0, errors.Count, "All tool fixtures must be processed: " + string.Join("; ", errors));
 	}
 

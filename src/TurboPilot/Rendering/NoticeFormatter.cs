@@ -4,6 +4,17 @@ using TurboPilot.Tools;
 
 namespace TurboPilot.Rendering;
 
+internal sealed record WorkflowPermissionReview(
+	string Name,
+	string Operation,
+	string Description,
+	IReadOnlyList<string> Phases,
+	string AiCredits,
+	string Timeout,
+	string ConcurrentSubagents,
+	string TotalSubagents,
+	bool CanPersistApproval);
+
 /// <summary>
 /// Builds the two forms of every transcript notice the application writes
 /// itself: the plain line shown in the Raw tab, and the marked-up form
@@ -74,6 +85,36 @@ internal static class NoticeFormatter
 				: Escape(kind) + ": <code>" + Escape(detail) + "</code>",
 			["yes (allow)", "no (deny)"],
 			"Reply with an option and press Send.");
+		return (text, rendered);
+	}
+
+	/// <summary>A complete review of a workflow before the runtime may run or author it.</summary>
+	public static (string Text, string Rendered) WorkflowPermission(WorkflowPermissionReview review)
+	{
+		var detail = new StringBuilder()
+			.Append("Workflow: ").Append(review.Name).Append("\r\n")
+			.Append("Operation: ").Append(review.Operation).Append("\r\n")
+			.Append("Description: ").Append(review.Description).Append("\r\n")
+			.Append("AI credits: ").Append(review.AiCredits).Append("\r\n")
+			.Append("Active time: ").Append(review.Timeout).Append("\r\n")
+			.Append("Concurrent subagents: ").Append(review.ConcurrentSubagents).Append("\r\n")
+			.Append("Total subagents: ").Append(review.TotalSubagents).Append("\r\n")
+			.Append("Persistent approval: ").Append(review.CanPersistApproval ? "available" : "not available")
+			.Append("\r\nPhases:");
+		if (review.Phases.Count == 0)
+			detail.Append(" none declared");
+		else
+		{
+			for (var i = 0; i < review.Phases.Count; i++)
+				detail.Append("\r\n").Append(i + 1).Append(". ").Append(review.Phases[i]);
+		}
+
+		const string hint = "Reply with an option and press Send.";
+		var text = "Permission requested - workflow\r\n" + detail
+			+ "\r\n1. yes (allow)  |  2. no (deny)\r\n" + hint;
+		var rendered = Card("permission", "Workflow permission requested", null,
+			"<div class=\"kp-permission-review\">" + Escape(detail.ToString()) + "</div>",
+			["yes (allow)", "no (deny)"], hint);
 		return (text, rendered);
 	}
 

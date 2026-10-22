@@ -32,7 +32,7 @@
 	</ItemGroup>
 
 	<ItemGroup>
-		<PackageReference Include="GitHub.Copilot.SDK" Version="1.0.14" />
+		<PackageReference Include="GitHub.Copilot.SDK" Version="1.0.26" />
 		<PackageReference Include="OpenAI" Version="2.13.0" />
 		<PackageReference Include="Microsoft.Web.WebView2" Version="1.0.4191.47" />
 		<PackageReference Include="YamlDotNet" Version="18.1.0" />
