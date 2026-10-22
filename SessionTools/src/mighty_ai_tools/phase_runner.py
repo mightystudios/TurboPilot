@@ -213,6 +213,26 @@ def complete_phase(
         return destination
 
 
+def rework_phase(
+    state_path: str | Path,
+    review_instructions: str,
+    timeout: float = 30.0,
+    poll_seconds: float = 0.25,
+    *,
+    process_checker: Callable[[int], bool] | None = None,
+    sleeper: Callable[[float], None] = time.sleep,
+) -> dict[str, Any]:
+    instructions = _nonempty(review_instructions, "review instructions")
+    return advance_phase(
+        state_path,
+        timeout,
+        poll_seconds,
+        process_checker=process_checker,
+        sleeper=sleeper,
+        review_instructions=instructions,
+    )
+
+
 def advance_phase(
     state_path: str | Path,
     timeout: float = 30.0,
@@ -220,6 +240,7 @@ def advance_phase(
     *,
     process_checker: Callable[[int], bool] | None = None,
     sleeper: Callable[[float], None] = time.sleep,
+    review_instructions: str | None = None,
 ) -> dict[str, Any]:
     if timeout < 0:
         raise RunnerError("timeout must be zero or greater")
@@ -227,6 +248,12 @@ def advance_phase(
         raise RunnerError("poll-seconds must be greater than zero")
     state_file = Path(state_path).resolve()
     checker = process_checker or _process_is_alive
+    instructions = (
+        _nonempty(review_instructions, "review instructions")
+        if review_instructions is not None
+        else None
+    )
+    is_rework = instructions is not None
     with _exclusive_lock(state_file.parent):
         state = _load_state(state_file)
         if state["pendingReplacement"] is not None:
@@ -256,15 +283,17 @@ def advance_phase(
             or result["phaseId"] != state["activePhaseId"]
         ):
             raise RunnerError("stored phase result does not match orchestration state")
+        if is_rework:
+            _archive_phase_result(state, result)
         manifest_path = Path(state["manifestPath"]).resolve()
         manifest = _load_object(manifest_path, "phase manifest")
         _validate_manifest(manifest)
         if manifest["roadmapId"] != state["roadmapId"]:
             raise RunnerError("phase manifest no longer matches orchestration state")
         phase = _phase_by_id(manifest, state["activePhaseId"])
-        successor = phase.get("successor")
+        successor = state["activePhaseId"] if is_rework else phase.get("successor")
         completed = list(state["completedPhases"])
-        if state["activePhaseId"] not in completed:
+        if not is_rework and state["activePhaseId"] not in completed:
             completed.append(state["activePhaseId"])
         state["completedPhases"] = completed
 
@@ -280,10 +309,11 @@ def advance_phase(
                 atomic_write_json(state_file, state)
             return _state_response(state_file, state)
 
-        successor_record = _phase_by_id(manifest, successor)
-        expected_predecessors = successor_record.get("predecessors")
-        if expected_predecessors != [state["activePhaseId"]]:
-            raise RunnerError("successor does not directly depend on the active phase")
+        if not is_rework:
+            successor_record = _phase_by_id(manifest, successor)
+            expected_predecessors = successor_record.get("predecessors")
+            if expected_predecessors != [state["activePhaseId"]]:
+                raise RunnerError("successor does not directly depend on the active phase")
         launch = _create_launch(
             manifest=manifest,
             manifest_path=manifest_path,
@@ -291,6 +321,8 @@ def advance_phase(
             state=state,
             phase_id=successor,
         )
+        if instructions is not None:
+            _append_rework_instructions(launch, instructions)
         if not process_alive:
             _activate_launch(state, launch, "starting")
             state["progress"] = _progress(
@@ -337,7 +369,9 @@ def advance_phase(
         state["phaseState"] = "replacing"
         state["progress"] = _progress(
             None,
-            f"Replacing Phase {pending['fromPhaseId']} with Phase {successor}.",
+            f"Replacing Phase {pending['fromPhaseId']} with a corrective session."
+            if is_rework
+            else f"Replacing Phase {pending['fromPhaseId']} with Phase {successor}.",
         )
         state["updatedAt"] = _utc_now()
         atomic_write_json(state_file, state)
@@ -581,6 +615,32 @@ def _initial_prompt(
     )
 
 
+def _append_rework_instructions(launch: Mapping[str, str], instructions: str) -> None:
+    request_path = Path(launch["requestPath"])
+    request = _load_object(request_path, "corrective launch request")
+    request["initialPrompt"] = (
+        f"{request['initialPrompt']}\n\nThis is a corrective rework of the same phase. "
+        "A prior result did not pass orchestrator review. Correct the listed findings "
+        "completely, remain within the active phase scope, rerun every listed validation "
+        "command, and submit a superseding phase result. Do not advance the roadmap.\n\n"
+        f"Orchestrator review findings:\n{instructions}"
+    )
+    _validate_launch_request(request)
+    atomic_write_json(request_path, request)
+
+
+def _archive_phase_result(state: Mapping[str, Any], result: Mapping[str, Any]) -> Path:
+    phase_id = _required_string(state, "activePhaseId", "orchestration state")
+    archive_path = (
+        Path(state["runDirectory"])
+        / "results"
+        / "superseded"
+        / f"phase-{phase_id}-{uuid4().hex}.json"
+    )
+    atomic_write_json(archive_path, result)
+    return archive_path
+
+
 def _request_close(state: dict[str, Any], disposition: str) -> None:
     selected_disposition = _nonempty(disposition, "disposition").lower()
     if selected_disposition not in CONTROL_DISPOSITIONS:
@@ -656,18 +716,30 @@ def _recover_pending_replacement(
     manifest = _load_object(Path(state["manifestPath"]), "phase manifest")
     _validate_manifest(manifest)
     successor = str(pending["toPhaseId"])
+    is_rework = pending["fromPhaseId"] == pending["toPhaseId"]
     _promote_pending(state, pending)
-    launch = _create_launch(
-        manifest=manifest,
-        manifest_path=Path(state["manifestPath"]),
-        state_path=state_path,
-        state=state,
-        phase_id=successor,
-    )
+    if is_rework:
+        launch = {
+            "phaseId": successor,
+            "launchId": pending["nextLaunchId"],
+            "requestPath": pending["requestPath"],
+            "sessionStatusPath": pending["sessionStatusPath"],
+            "resultPath": pending["resultPath"],
+        }
+    else:
+        launch = _create_launch(
+            manifest=manifest,
+            manifest_path=Path(state["manifestPath"]),
+            state_path=state_path,
+            state=state,
+            phase_id=successor,
+        )
     _activate_launch(state, launch, "starting")
     state["progress"] = _progress(
         None,
-        "Managed process ended during replacement; launching the successor.",
+        "Managed process ended during corrective rework; launching a new session."
+        if is_rework
+        else "Managed process ended during replacement; launching the successor.",
     )
     state["updatedAt"] = _utc_now()
     control_path = Path(state["controlPath"])
@@ -762,7 +834,10 @@ def _promote_pending(
     pending: Mapping[str, Any],
 ) -> None:
     completed = list(state["completedPhases"])
-    if pending["fromPhaseId"] not in completed:
+    if (
+        pending["fromPhaseId"] != pending["toPhaseId"]
+        and pending["fromPhaseId"] not in completed
+    ):
         completed.append(pending["fromPhaseId"])
     state["completedPhases"] = completed
     state["activePhaseId"] = pending["toPhaseId"]
@@ -1536,6 +1611,15 @@ def _build_parser() -> argparse.ArgumentParser:
     advance.add_argument("--timeout", type=float, default=30.0)
     advance.add_argument("--poll-seconds", type=float, default=0.25)
 
+    rework = commands.add_parser(
+        "rework",
+        help="Replace a rejected completed phase with a corrective session.",
+    )
+    rework.add_argument("--state", required=True)
+    rework.add_argument("--instructions", required=True)
+    rework.add_argument("--timeout", type=float, default=30.0)
+    rework.add_argument("--poll-seconds", type=float, default=0.25)
+
     close = commands.add_parser(
         "close",
         help="Close the managed TurboPilot executor process.",
@@ -1576,6 +1660,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         elif arguments.command == "advance":
             value = advance_phase(
                 arguments.state,
+                arguments.timeout,
+                arguments.poll_seconds,
+            )
+        elif arguments.command == "rework":
+            value = rework_phase(
+                arguments.state,
+                arguments.instructions,
                 arguments.timeout,
                 arguments.poll_seconds,
             )

@@ -20,6 +20,7 @@ from mighty_ai_tools.phase_runner import (
     close_orchestration,
     complete_phase,
     inspect_orchestration,
+    rework_phase,
     start_orchestration,
     update_progress,
 )
@@ -354,6 +355,104 @@ class PhaseRunnerTests(unittest.TestCase):
             ).iterdir()
         )
         self.assertEqual(len(sessions), 2)
+
+    def test_rework_replaces_completed_phase_without_advancing(self) -> None:
+        response = self.start()
+        self.complete(response)
+
+        with mock.patch("mighty_ai_tools.phase_runner._launch_process") as launch:
+            reworking = rework_phase(
+                response["statePath"],
+                "Replace inferred runtime values with explicit types.",
+                timeout=0,
+                process_checker=lambda process_id: True,
+            )
+
+        state = state_from(response)
+        pending = state["pendingReplacement"]
+        control = json.loads(Path(state["controlPath"]).read_text(encoding="ascii"))
+        request = json.loads(Path(pending["requestPath"]).read_text(encoding="ascii"))
+        archive_directory = self.root / ".mighty-ai-runs" / "runner-roadmap" / "results" / "superseded"
+        archives = list(archive_directory.glob("phase-01-*.json"))
+
+        self.assertEqual(reworking["phaseState"], "replacing")
+        self.assertEqual(pending["fromPhaseId"], "01")
+        self.assertEqual(pending["toPhaseId"], "01")
+        self.assertEqual(state["completedPhases"], [])
+        self.assertEqual(control["action"], "replace")
+        self.assertEqual(control["targetProcessId"], 4321)
+        self.assertEqual(len(archives), 1)
+        self.assertIn(
+            "Replace inferred runtime values with explicit types.",
+            request["initialPrompt"],
+        )
+        launch.assert_not_called()
+
+    def test_rework_promotes_same_phase_and_accepts_a_superseding_result(self) -> None:
+        response = self.start()
+        self.complete(response)
+        rework_phase(
+            response["statePath"],
+            "Correct the review findings.",
+            timeout=0,
+            process_checker=lambda process_id: True,
+        )
+        state = state_from(response)
+        pending = state["pendingReplacement"]
+        write_session_status(Path(pending["requestPath"]), state="running")
+
+        status = inspect_orchestration(
+            response["statePath"],
+            now=datetime(2026, 10, 20, 1, 0, tzinfo=timezone.utc),
+            process_checker=lambda process_id: True,
+        )
+        promoted = state_from(response)
+        candidate = candidate_result()
+        candidate["summary"] = "Phase 01 passed after correction."
+        candidate_path = self.root / "corrected-candidate.json"
+        write_json(candidate_path, candidate)
+        complete_phase(response["statePath"], candidate_path)
+        superseding = json.loads(
+            Path(promoted["activeResultPath"]).read_text(encoding="ascii")
+        )
+
+        self.assertEqual(status["classification"], "working")
+        self.assertEqual(promoted["activePhaseId"], "01")
+        self.assertEqual(promoted["completedPhases"], [])
+        self.assertEqual(promoted["phaseState"], "running")
+        self.assertEqual(superseding["summary"], "Phase 01 passed after correction.")
+
+    def test_rework_recovers_same_phase_after_the_process_exits(self) -> None:
+        response = self.start()
+        self.complete(response)
+        rework_phase(
+            response["statePath"],
+            "Correct strict typing violations.",
+            timeout=0,
+            process_checker=lambda process_id: True,
+        )
+
+        with mock.patch(
+            "mighty_ai_tools.phase_runner._launch_process",
+            return_value=9876,
+        ) as launch:
+            recovered = rework_phase(
+                response["statePath"],
+                "Correct strict typing violations.",
+                timeout=0,
+                process_checker=lambda process_id: False,
+            )
+
+        state = state_from(response)
+        request = json.loads(
+            Path(state["activeRequestPath"]).read_text(encoding="ascii")
+        )
+        self.assertEqual(recovered["activePhaseId"], "01")
+        self.assertEqual(recovered["phaseState"], "starting")
+        self.assertEqual(state["processId"], 9876)
+        self.assertEqual(state["completedPhases"], [])
+        self.assertIn("Correct strict typing violations.", request["initialPrompt"])
+        launch.assert_called_once()
 
     def test_status_promotes_confirmed_replacement(self) -> None:
         response = self.start()

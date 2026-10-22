@@ -103,6 +103,13 @@ For the final phase, `advance` closes the managed executor. To stop earlier:
 python "$env:TURBOPILOT_SESSION_TOOLS\src\TurboPilotPhaseRunner\phase-runner.py" close --state "C:\work\plans\.mighty-ai-runs\roadmap-id\orchestration-state.json"
 ```
 
+When review identifies a correctable issue in a completed active phase, replace
+that session without advancing the roadmap:
+
+```powershell
+python "$env:TURBOPILOT_SESSION_TOOLS\src\TurboPilotPhaseRunner\phase-runner.py" rework --state "C:\work\plans\.mighty-ai-runs\roadmap-id\orchestration-state.json" --instructions "<specific corrective findings>"
+```
+
 ## Executor Commands
 
 The executor records milestone progress in the single orchestration state:
@@ -128,6 +135,8 @@ The orchestrator alone advances the roadmap.
   not create another process.
 - `advance` writes one targeted TurboPilot `replace` command and reuses the
   recorded process ID.
+- `rework` archives the rejected result and writes one targeted TurboPilot
+  `replace` command for a corrective session of the same phase.
 - Replacement requests use a new launch ID and status path while retaining one
   control path.
 - Plans are immutable during execution; runtime progress lives in
