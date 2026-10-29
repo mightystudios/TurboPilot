@@ -76,7 +76,9 @@
 	var transcriptText = "";
 	var transcriptRenderTimer = 0;
 	var transcriptDiagramTimer = 0;
-	var TRANSCRIPT_RENDER_MS = 40;   // coalesce rapid appends while streaming
+	var transcriptRenderDuration = 0;
+	var TRANSCRIPT_RENDER_MIN_MS = 80;
+	var TRANSCRIPT_RENDER_MAX_MS = 1000;
 	var TRANSCRIPT_DIAGRAM_MS = 300; // convert diagrams once the stream pauses
 	var codeCopySequence = 0;
 
@@ -689,6 +691,7 @@
 	// this one rendered for human viewing.
 
 	function renderTranscript(withDiagrams) {
+		var started = performance.now();
 		var shown = disclosureState(outputEl);
 		outputEl.innerHTML = renderMarkdown(transcriptText);
 		styleUserPromptEchoes(outputEl);
@@ -701,6 +704,15 @@
 			processOversizedBlocks(outputEl);
 		}
 		scrollToBottom();
+		transcriptRenderDuration = performance.now() - started;
+	}
+
+	function transcriptRenderDelay() {
+		// Rebuilding a long transcript can take longer than the original
+		// fixed delay. Give the browser a bounded rest proportional to that
+		// work so it can paint, process input, and resize its host surface.
+		return Math.max(TRANSCRIPT_RENDER_MIN_MS,
+			Math.min(TRANSCRIPT_RENDER_MAX_MS, transcriptRenderDuration));
 	}
 
 	// -- Tool rows ---------------------------------------------------
@@ -864,8 +876,8 @@
 
 	/**
 	 * Append text to the transcript. Rapid appends (streaming tokens)
-	 * are coalesced: markdown re-renders within ~40ms of the first
-	 * delta, and the Mermaid/table pass runs once the stream pauses.
+	 * are coalesced. The next markdown pass is delayed according to the
+	 * cost of the previous pass, and Mermaid/table work waits for a pause.
 	 */
 	window.appendTranscript = function (text) {
 		if (!text) return;
@@ -874,11 +886,15 @@
 			transcriptRenderTimer = setTimeout(function () {
 				transcriptRenderTimer = 0;
 				renderTranscript(false);
-			}, TRANSCRIPT_RENDER_MS);
+			}, transcriptRenderDelay());
 		}
 		if (transcriptDiagramTimer) clearTimeout(transcriptDiagramTimer);
 		transcriptDiagramTimer = setTimeout(function () {
 			transcriptDiagramTimer = 0;
+			if (transcriptRenderTimer) {
+				clearTimeout(transcriptRenderTimer);
+				transcriptRenderTimer = 0;
+			}
 			renderTranscript(true);
 		}, TRANSCRIPT_DIAGRAM_MS);
 	};

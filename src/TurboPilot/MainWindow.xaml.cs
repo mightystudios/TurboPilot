@@ -25,6 +25,13 @@ public partial class MainWindow : TurbolandWindow
 	// The single file: URI that the WebView2 is allowed to navigate to.
 	private string? _outputHtmlUri;
 	private bool _webViewReady = false;
+	private const int RenderedUpdateBatchMilliseconds = 60;
+	private readonly System.Windows.Threading.DispatcherTimer _renderedUpdateTimer;
+	private readonly StringBuilder _pendingRenderedAppend = new();
+	private readonly Queue<string> _pendingRendererCommands = new();
+	private bool _renderedFullSyncPending;
+	private bool _renderedFlushRunning;
+	private Task _renderedFlushTask = Task.CompletedTask;
 
 	// The startup help and offline history open at the top. A resumed live
 	// session opens at the end. Keep each request until its view is ready.
@@ -135,6 +142,12 @@ public partial class MainWindow : TurbolandWindow
 		_webViewDataFolder = webViewDataFolder ?? System.IO.Path.Combine(
 			Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "TurboPilot", "webview2-default");
 		InitializeComponent();
+		_renderedUpdateTimer = new System.Windows.Threading.DispatcherTimer(
+			System.Windows.Threading.DispatcherPriority.Background, Dispatcher)
+		{
+			Interval = TimeSpan.FromMilliseconds(RenderedUpdateBatchMilliseconds),
+		};
+		_renderedUpdateTimer.Tick += RenderedUpdateTimer_Tick;
 
 		// Cues are a saved preference, not session state, so they are live
 		// from startup rather than from the first session.
@@ -909,9 +922,9 @@ public partial class MainWindow : TurbolandWindow
 	}
 
 	/// <summary>
-	/// Appends text verbatim to the Raw tab and immediately syncs the
-	/// Rendered tab to the same content. Safe to call from any thread;
-	/// appends are applied in order on the UI thread.
+	/// Appends text verbatim to the Raw tab and queues the same content for
+	/// the Rendered tab. Safe to call from any thread; appends are applied
+	/// in order on the UI thread.
 	/// </summary>
 	public void AppendOutput(string text)
 	{
@@ -938,13 +951,22 @@ public partial class MainWindow : TurbolandWindow
 	private void AppendRenderedOutput(string text)
 	{
 		_renderedText.Append(text);
-		PushToRenderer($"appendTranscript({JsString(text)})");
+		if (_renderedFullSyncPending || !_webViewReady)
+		{
+			_pendingRenderedAppend.Clear();
+			_renderedFullSyncPending = true;
+		}
+		else
+		{
+			_pendingRenderedAppend.Append(text);
+		}
+		ScheduleRenderedUpdate();
 	}
 
 	private void ReplaceRenderedOutput(string text)
 	{
 		_renderedText.Clear().Append(text);
-		PushToRenderer($"setTranscript({JsString(text)})");
+		QueueRenderedFullSync();
 	}
 
 	/// <summary>
@@ -962,18 +984,19 @@ public partial class MainWindow : TurbolandWindow
 		_outputText.Clear();
 		_renderedText.Clear();
 		_rawOutputRun.Text = "";
-		PushToRenderer("clearAll()");
+		QueueRenderedFullSync();
 	}
 
 	/// <summary>
-	/// Executes renderer script once the page is loaded. Content written
-	/// before the page is ready is not lost: the full transcript is
-	/// replayed via SyncRenderedTranscript when navigation completes.
+	/// Queues a low-volume renderer command once the page is loaded.
+	/// Transcript changes use the same serialized flush so commands cannot
+	/// overtake a replacement of the document they act on.
 	/// </summary>
 	private void PushToRenderer(string js)
 	{
 		if (!_webViewReady) return;
-		_ = webViewOutput.CoreWebView2.ExecuteScriptAsync(js);
+		_pendingRendererCommands.Enqueue(js);
+		ScheduleRenderedUpdate();
 	}
 
 	/// <summary>
@@ -982,8 +1005,7 @@ public partial class MainWindow : TurbolandWindow
 	private void SyncRenderedTranscript()
 	{
 		if (!_webViewReady) return;
-		_ = webViewOutput.CoreWebView2.ExecuteScriptAsync($"setTranscript({JsString(_renderedText.ToString())})");
-		ApplyRenderedTranscriptPosition();
+		QueueRenderedFullSync();
 	}
 
 	/// <summary>
@@ -1006,12 +1028,127 @@ public partial class MainWindow : TurbolandWindow
 	private void ApplyRenderedTranscriptPosition()
 	{
 		if (_renderedTranscriptPosition == TranscriptPosition.None || !_webViewReady) return;
+		ScheduleRenderedUpdate();
+	}
 
-		string function = _renderedTranscriptPosition == TranscriptPosition.Top
-			? "scrollToTop"
-			: "scrollToEnd";
-		_renderedTranscriptPosition = TranscriptPosition.None;
-		_ = webViewOutput.CoreWebView2.ExecuteScriptAsync($"{function}()");
+	private void QueueRenderedFullSync()
+	{
+		_pendingRenderedAppend.Clear();
+		_renderedFullSyncPending = true;
+		ScheduleRenderedUpdate();
+	}
+
+	private bool HasPendingRenderedUpdate =>
+		_renderedFullSyncPending
+		|| _pendingRenderedAppend.Length > 0
+		|| _pendingRendererCommands.Count > 0
+		|| _renderedTranscriptPosition != TranscriptPosition.None;
+
+	private void ScheduleRenderedUpdate()
+	{
+		if (!_webViewReady || _closing || _renderedFlushRunning || _renderedUpdateTimer.IsEnabled)
+			return;
+		_renderedUpdateTimer.Start();
+	}
+
+	private void RenderedUpdateTimer_Tick(object? sender, EventArgs e)
+	{
+		_renderedUpdateTimer.Stop();
+		StartRenderedFlush();
+	}
+
+	private void StartRenderedFlush()
+	{
+		if (_renderedFlushRunning || !_webViewReady || _closing || !HasPendingRenderedUpdate)
+			return;
+		_renderedFlushTask = FlushRenderedOutputAsync();
+	}
+
+	private async Task FlushRenderedOutputAsync()
+	{
+		_renderedFlushRunning = true;
+		var script = BuildRenderedUpdateScript();
+		try
+		{
+			await webViewOutput.CoreWebView2.ExecuteScriptAsync(script);
+		}
+		catch (InvalidOperationException ex)
+		{
+			HandleRenderedUpdateFailure(ex);
+		}
+		catch (System.Runtime.InteropServices.COMException ex)
+		{
+			HandleRenderedUpdateFailure(ex);
+		}
+		finally
+		{
+			_renderedFlushRunning = false;
+			if (HasPendingRenderedUpdate)
+				ScheduleRenderedUpdate();
+		}
+	}
+
+	private string BuildRenderedUpdateScript()
+	{
+		var script = new StringBuilder();
+		if (_renderedFullSyncPending)
+		{
+			_renderedFullSyncPending = false;
+			_pendingRenderedAppend.Clear();
+			script.Append("setTranscript(")
+				.Append(JsString(_renderedText.ToString()))
+				.Append(");");
+		}
+		else if (_pendingRenderedAppend.Length > 0)
+		{
+			var append = _pendingRenderedAppend.ToString();
+			_pendingRenderedAppend.Clear();
+			script.Append("appendTranscript(")
+				.Append(JsString(append))
+				.Append(");");
+		}
+
+		while (_pendingRendererCommands.TryDequeue(out var command))
+			script.Append(command).Append(';');
+
+		if (_renderedTranscriptPosition != TranscriptPosition.None)
+		{
+			script.Append(_renderedTranscriptPosition == TranscriptPosition.Top
+				? "scrollToTop();"
+				: "scrollToEnd();");
+			_renderedTranscriptPosition = TranscriptPosition.None;
+		}
+		return script.ToString();
+	}
+
+	private void HandleRenderedUpdateFailure(Exception exception)
+	{
+		_pendingRenderedAppend.Clear();
+		_pendingRendererCommands.Clear();
+		_renderedFullSyncPending = true;
+		_renderedUpdateTimer.Stop();
+		_webViewReady = false;
+		if (_closing)
+			return;
+
+		AppendOutput($"\r\n[error] Rendered output stopped responding: {exception.Message}\r\n\r\n");
+		outputTabs.SelectedIndex = 1;
+	}
+
+	private async Task FlushRenderedOutputNowAsync()
+	{
+		_renderedUpdateTimer.Stop();
+		while (_webViewReady && !_closing)
+		{
+			if (_renderedFlushRunning)
+			{
+				await _renderedFlushTask;
+				continue;
+			}
+			if (!HasPendingRenderedUpdate)
+				return;
+			StartRenderedFlush();
+		}
 	}
 
 	private void ApplyRawTranscriptPosition()
@@ -2697,6 +2834,9 @@ public partial class MainWindow : TurbolandWindow
 			return null;
 		}
 
+		await FlushRenderedOutputNowAsync();
+		if (!_webViewReady)
+			return null;
 		var json = await webViewOutput.CoreWebView2.ExecuteScriptAsync(
 			"typeof exportTranscriptHtml === 'function' ? exportTranscriptHtml()"
 			+ " : (document.getElementById('output') ? document.getElementById('output').innerHTML : '')");
@@ -2766,6 +2906,7 @@ public partial class MainWindow : TurbolandWindow
 		_launchStatus?.Dispose();
 		_attachments.Clear();
 		PruneImagePreviews();
+		_renderedUpdateTimer.Stop();
 		webViewOutput.Dispose();
 		base.OnClosed(e);
 	}

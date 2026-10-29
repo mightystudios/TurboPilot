@@ -419,6 +419,65 @@ internal static class UiChecks
 		Console.WriteLine("PASS Rendered user prompt styling in WebView2");
 	}
 
+	private static async Task CheckRenderedResizeUnderStreamingAsync(MainWindow window, WebView2 webView)
+	{
+		const string marker = "RENDERED_RESIZE_STREAM_FINISHED";
+		var originalWidth = window.Width;
+		window.ClearOutput();
+		await InvokeTask(window, "FlushRenderedOutputNowAsync");
+		await webView.CoreWebView2.ExecuteScriptAsync(
+			"window.__tpAppendCalls = 0;"
+			+ "window.__tpOriginalAppendTranscript = window.appendTranscript;"
+			+ "window.appendTranscript = function (text) {"
+			+ " window.__tpAppendCalls++;"
+			+ " return window.__tpOriginalAppendTranscript(text);"
+			+ "};");
+
+		try
+		{
+			var chunk = new string('x', 96) + "\r\n";
+			for (var index = 0; index < 2000; index++)
+				Invoke(window, "AppendRenderedOutput", chunk);
+			Invoke(window, "AppendRenderedOutput", marker);
+
+			window.Width = originalWidth + 120;
+			await window.Dispatcher.InvokeAsync(() => { }, DispatcherPriority.Loaded);
+
+			var ready = false;
+			var appendCalls = int.MaxValue;
+			var browserWidth = 0d;
+			for (var attempt = 0; attempt < 150 && !ready; attempt++)
+			{
+				using var result = JsonDocument.Parse(await webView.CoreWebView2.ExecuteScriptAsync(
+					"({ calls: window.__tpAppendCalls,"
+					+ " marker: document.getElementById('output').textContent.includes('"
+					+ marker + "'), width: window.innerWidth })"));
+				appendCalls = result.RootElement.GetProperty("calls").GetInt32();
+				browserWidth = result.RootElement.GetProperty("width").GetDouble();
+				ready = result.RootElement.GetProperty("marker").GetBoolean()
+					&& Math.Abs(browserWidth - webView.ActualWidth) <= 2;
+				if (!ready)
+					await Task.Delay(100);
+			}
+
+			Check.True(ready,
+				$"The Rendered browser surface must reach the resized frame. Browser width {browserWidth}, control width {webView.ActualWidth}.");
+			Check.True(appendCalls is > 0 and < 25,
+				$"Stream updates must be batched before crossing into WebView2; observed {appendCalls} browser calls.");
+		}
+		finally
+		{
+			window.Width = originalWidth;
+			window.ClearOutput();
+			await webView.CoreWebView2.ExecuteScriptAsync(
+				"window.appendTranscript = window.__tpOriginalAppendTranscript;"
+				+ "delete window.__tpOriginalAppendTranscript;"
+				+ "delete window.__tpAppendCalls;");
+		}
+
+		Console.WriteLine("PASS Rendered streaming stays responsive and aligned while the window resizes");
+	}
+
 	private static async Task RunWindowChecksAsync(Application application)
 	{
 		using var workspace = new TestWorkspace();
@@ -460,6 +519,7 @@ internal static class UiChecks
 			await CheckCodeBlockCopyAsync(window, webView);
 			await CheckPromptLayoutAsync(window);
 			await CheckRenderedUserPromptStyleAsync(window, webView);
+			await CheckRenderedResizeUnderStreamingAsync(window, webView);
 			CheckThemedMessageDialogs(application, window, workspace);
 
 			var starting = InvokeTask(window, "StartChatAsync", options, null);
