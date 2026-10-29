@@ -33,6 +33,9 @@ internal sealed record WorkflowPermissionReview(
 /// </summary>
 internal static class NoticeFormatter
 {
+	private const string QuestionReplyHint =
+		"Reply with an option number, its text, or your own answer and press Send.";
+
 	// Escaped text inside a notice holds no tag, so it runs from its
 	// opening tag to the next one.
 	private static readonly Regex SavedText = new(
@@ -62,29 +65,26 @@ internal static class NoticeFormatter
 			match => ToolRowTag(match.Groups["state"].Value == "running" ? "stopped" : match.Groups["state"].Value));
 
 	/// <summary>A question with its answer choices.</summary>
-	public static (string Text, string Rendered) Question(string question, IReadOnlyList<string> choices, bool allowFreeform)
+	public static (string Text, string Rendered) Question(string question, IReadOnlyList<string> choices)
 	{
-		var hint = allowFreeform
-			? "Reply with an option number, its text, or your own answer and press Send."
-			: "Reply with an option number or its text and press Send.";
 		var text = new StringBuilder("Question: ").Append(question);
 		if (choices.Count > 0)
 			text.Append("\r\n").Append(string.Join("  |  ", choices.Select((choice, index) => $"{index + 1}. {choice}")));
-		text.Append("\r\n(").Append(hint).Append(')');
-		return (text.ToString(), Card("question", "Question", question, null, choices, hint));
+		text.Append("\r\n(").Append(QuestionReplyHint).Append(')');
+		return (text.ToString(), Card("question", "Question", question, null, choices, QuestionReplyHint));
 	}
 
 	/// <summary>A permission request for one operation.</summary>
 	public static (string Text, string Rendered) Permission(string kind, string? detail)
 	{
 		var label = string.IsNullOrWhiteSpace(detail) ? kind : $"{kind}: {detail}";
-		var text = $"Permission requested - {label}\r\n1. yes (allow)  |  2. no (deny)\r\nReply with an option and press Send.";
+		var text = $"Permission requested - {label}\r\n1. yes (allow)  |  2. no (deny)\r\n{QuestionReplyHint}";
 		var rendered = Card("permission", "Permission requested", null,
 			string.IsNullOrWhiteSpace(detail)
 				? Escape(kind)
 				: Escape(kind) + ": <code>" + Escape(detail) + "</code>",
 			["yes (allow)", "no (deny)"],
-			"Reply with an option and press Send.");
+			QuestionReplyHint);
 		return (text, rendered);
 	}
 
@@ -109,12 +109,11 @@ internal static class NoticeFormatter
 				detail.Append("\r\n").Append(i + 1).Append(". ").Append(review.Phases[i]);
 		}
 
-		const string hint = "Reply with an option and press Send.";
 		var text = "Permission requested - workflow\r\n" + detail
-			+ "\r\n1. yes (allow)  |  2. no (deny)\r\n" + hint;
+			+ "\r\n1. yes (allow)  |  2. no (deny)\r\n" + QuestionReplyHint;
 		var rendered = Card("permission", "Workflow permission requested", null,
 			"<div class=\"kp-permission-review\">" + Escape(detail.ToString()) + "</div>",
-			["yes (allow)", "no (deny)"], hint);
+			["yes (allow)", "no (deny)"], QuestionReplyHint);
 		return (text, rendered);
 	}
 

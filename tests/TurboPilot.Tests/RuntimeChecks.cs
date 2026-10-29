@@ -110,6 +110,8 @@ internal static class RuntimeChecks
 		File.WriteAllText(workspace.ApplicationInstructionsPath, "EDITED_APPLICATION_INSTRUCTIONS_SENTINEL");
 		await using (var resumed = workspace.CreateChat())
 		{
+			var resumedErrors = new ConcurrentQueue<string>();
+			resumed.ErrorReceived += resumedErrors.Enqueue;
 			await resumed.ResumeAsync(sessionId, options).WaitAsync(TimeSpan.FromSeconds(45));
 			Check.True(resumed.Transcript.StartsWith(firstTranscript, StringComparison.Ordinal), "Recall the exact prior display transcript.");
 			Check.Equal("first prompt marker", resumed.Record!.Prompts.Single(), "Recall prompt history by session ID");
@@ -154,14 +156,40 @@ internal static class RuntimeChecks
 			Check.True(toolNames.Contains("ask_user"), "The runtime must expose its chat question tool: " + string.Join(", ", toolNames));
 			provider.Replies.Enqueue(new LocalProvider.Reply("", ToolName: "ask_user",
 				ToolArguments: """{"question":"Choose a color","choices":["red","blue"],"allowFreeform":false}"""));
-			provider.Replies.Enqueue(new LocalProvider.Reply("Choice accepted."));
+			provider.Replies.Enqueue(new LocalProvider.Reply("Custom answer accepted."));
 			await resumed.SendAsync("ask a question");
 			await Check.UntilAsync(() => resumed.HasPendingQuestion, "The user-input tool did not request an answer.");
 			Check.True(resumed.Transcript.Contains("1. red") && resumed.Transcript.Contains("2. blue"), "Display numbered options in the transcript.");
-			await resumed.SendAsync("2");
+			await resumed.SendAsync("purple with a warm accent");
 			await Check.UntilAsync(() => !resumed.IsWorking, "The question turn did not finish.");
-			Check.True(provider.Requests.Last().GetRawText().Contains("blue"), "Return choice text to the runtime.");
-			Console.WriteLine("PASS native model questions answered in chat");
+			Check.True(provider.Requests.Last().GetRawText().Contains("purple with a warm accent"),
+				"Return custom text to the runtime even when the tool disables freeform input.");
+			Check.True(!resumedErrors.Any(error => error.Contains("Reply with a listed option", StringComparison.Ordinal)),
+				"A custom answer must not produce a send failure.");
+
+			var heldForAutoSwitch = new LocalProvider.Reply("Rate-limited turn.", Hold: true);
+			provider.Replies.Enqueue(heldForAutoSwitch);
+			await resumed.SendAsync("start an automatic model-switch check");
+			await heldForAutoSwitch.Started.Task.WaitAsync(TimeSpan.FromSeconds(15));
+			var autoSwitch = resumed.HandleAutoModeSwitchRequestAsync(new(), new());
+			Check.True(resumed.HasPendingQuestion, "Show the automatic model-switch choices.");
+			var freshPrompt = new LocalProvider.Reply("Fresh prompt accepted.");
+			provider.Replies.Enqueue(freshPrompt);
+			try
+			{
+				await resumed.SendAsync("Explain a manual fallback instead.");
+				await freshPrompt.Started.Task.WaitAsync(TimeSpan.FromSeconds(15));
+				await Check.UntilAsync(() => !resumed.IsWorking, "The custom fallback prompt did not finish.");
+			}
+			finally
+			{
+				heldForAutoSwitch.Release.TrySetResult();
+			}
+			Check.Equal(AutoModeSwitchResponse.No, await autoSwitch,
+				"Cancel a control that cannot carry custom feedback.");
+			Check.True(provider.Requests.Last().GetRawText().Contains("Explain a manual fallback instead."),
+				"Send unmatched control text as a fresh model prompt.");
+			Console.WriteLine("PASS native model questions accept custom replies and unsupported controls fall back to prompts");
 
 			var scopeKey = PermissionService.MakeKey(workspace.Workspace);
 			var scopes = PermissionService.Current.Workspaces;
@@ -174,11 +202,14 @@ internal static class RuntimeChecks
 				Check.True(toolNames.Contains("powershell"), "The Windows shell tool must be present.");
 				provider.Replies.Enqueue(new LocalProvider.Reply("", ToolName: "powershell",
 					ToolArguments: """{"command":"Write-Output TurboPilotPermissionProbe","description":"Write a fixture marker"}"""));
+				provider.Replies.Enqueue(new LocalProvider.Reply("Read-only feedback accepted."));
 				await resumed.SendAsync("request a shell permission");
 				await Check.UntilAsync(() => resumed.HasPendingQuestion, "The permission request did not wait for the user.");
 				Check.True(resumed.Transcript.Contains("Permission requested - shell"), "Render permission requests in chat.");
-				await resumed.SendAsync("2");
+				await resumed.SendAsync("Use a read-only validation instead.");
 				await Check.UntilAsync(() => !resumed.IsWorking, "The denied tool turn did not finish.");
+				Check.True(provider.Requests.Last().GetRawText().Contains("Use a read-only validation instead."),
+					"Forward custom permission feedback into the active model turn.");
 				Check.True(toolResults.TryDequeue(out var denied) && !denied.Success,
 					"Deny the actual tool request: " + JsonSerializer.Serialize(denied));
 
@@ -220,7 +251,7 @@ internal static class RuntimeChecks
 				Check.True(resumed.Transcript.Contains("Changes (") && resumed.Transcript.Contains("+ changed.txt"),
 					"A turn that changed the workspace must say so: " + resumed.Transcript);
 				Check.True(resumed.RenderedTranscript.Contains("kp-change-added")
-					&& resumed.RenderedTranscript.Contains("kp-act:diff"),
+					&& resumed.RenderedTranscript.Contains("kp-act:tool"),
 					"Each changed file must be clickable.");
 				Console.WriteLine("PASS per-turn workspace change reporting");
 			}

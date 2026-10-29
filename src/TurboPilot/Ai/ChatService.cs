@@ -13,6 +13,7 @@ namespace TurboPilot.Ai;
 
 public sealed partial class ChatService : IAsyncDisposable
 {
+	private const string UserCanceledAnswer = "(user canceled)";
 	private readonly object _sync = new();
 	private readonly SemaphoreSlim _lifecycle = new(1, 1);
 	private readonly SemaphoreSlim _sending = new(1, 1);
@@ -337,12 +338,13 @@ public sealed partial class ChatService : IAsyncDisposable
 		try
 		{
 			var session = _session ?? throw new InvalidOperationException("No active session.");
+			var replacesPendingQuestion = false;
 			if (HasPendingQuestion)
 			{
-				if (attachmentPaths is { Count: > 0 })
-					throw new InvalidOperationException("Answer the question without attachments. Remove them or press Stop to send a new prompt.");
-				if (TryAnswerPending(prompt))
+				if (attachmentPaths is not { Count: > 0 } && TryAnswerPending(prompt))
 					return;
+				// The pending callback cannot carry this reply, so send it as a new prompt.
+				replacesPendingQuestion = true;
 			}
 			if (string.IsNullOrWhiteSpace(prompt) && attachmentPaths is not { Count: > 0 })
 				throw new ArgumentException("Enter a prompt or attach a file.", nameof(prompt));
@@ -360,6 +362,10 @@ public sealed partial class ChatService : IAsyncDisposable
 			{
 				await InterruptAsync(session, linked.Token);
 				AddNotice(NoticeFormatter.Status("interrupted", "Previous turn stopped"));
+			}
+			else if (replacesPendingQuestion)
+			{
+				ReleaseQuestions();
 			}
 			// Changes requested during the previous turn apply before this prompt.
 			ChatSessionOptions? pending;
@@ -753,7 +759,9 @@ public sealed partial class ChatService : IAsyncDisposable
 		{
 			if (!_questions.TryPeek(out var question))
 				return false;
-			var response = ResolveAnswer(answer, question.Choices, question.AllowFreeform, question.IsPermission);
+			var response = ResolveAnswer(answer, question.Choices, question.AcceptFreeformAsAnswer, question.IsPermission);
+			if (response is null)
+				return false;
 			RecordUserInput(answer);
 			_questions.Dequeue();
 			if (_questions.TryPeek(out var next))
@@ -766,7 +774,8 @@ public sealed partial class ChatService : IAsyncDisposable
 		return true;
 	}
 
-	internal static UserInputResponse ResolveAnswer(string answer, IReadOnlyList<string> choices, bool allowFreeform, bool isPermission = false)
+	internal static UserInputResponse? ResolveAnswer(string answer, IReadOnlyList<string> choices,
+		bool acceptFreeformAsAnswer, bool isPermission = false)
 	{
 		var trimmed = answer.Trim();
 		if (isPermission)
@@ -785,19 +794,19 @@ public sealed partial class ChatService : IAsyncDisposable
 		var choice = choices.FirstOrDefault(choice => choice.Equals(trimmed, StringComparison.OrdinalIgnoreCase));
 		if (choice is not null)
 			return new UserInputResponse { Answer = choice, WasFreeform = false };
-		if (allowFreeform && trimmed.Length > 0)
+		if (acceptFreeformAsAnswer && trimmed.Length > 0)
 			return new UserInputResponse { Answer = answer, WasFreeform = true };
-		throw new InvalidOperationException("Reply with a listed option number or its text.");
+		return null;
 	}
 
 	private Task<UserInputResponse> AwaitAnswerAsync(string text, string rendered, IReadOnlyList<string> choices,
-		bool allowFreeform, bool isPermission = false)
+		bool acceptFreeformAsAnswer, bool isPermission = false)
 	{
 		lock (_sync)
 		{
 			if (!_acceptQuestions || _disposeStarted != 0)
 				return Task.FromCanceled<UserInputResponse>(new CancellationToken(canceled: true));
-			var question = new PendingQuestion(text, rendered, choices, allowFreeform, isPermission);
+			var question = new PendingQuestion(text, rendered, choices, acceptFreeformAsAnswer, isPermission);
 			_questions.Enqueue(question);
 			if (_questions.Count == 1)
 				AddNotice(text, rendered);
@@ -820,14 +829,18 @@ public sealed partial class ChatService : IAsyncDisposable
 	internal async Task<UserInputResponse> HandleUserInputRequestAsync(UserInputRequest request, UserInputInvocation invocation)
 	{
 		var choices = request.Choices?.ToArray() ?? [];
-		var allowFreeform = request.AllowFreeform ?? true;
-		if (choices.Length == 0 && !allowFreeform)
-			throw new InvalidOperationException("The runtime asked a question without any valid answers.");
-		var (text, rendered) = NoticeFormatter.Question(request.Question, choices, allowFreeform);
-		try { return await AwaitAnswerAsync(text, rendered, choices, allowFreeform); }
+		// TurboPilot always allows the user to answer in their own words.
+		return await AskQuestionAsync(request.Question, choices, acceptFreeformAsAnswer: true);
+	}
+
+	private async Task<UserInputResponse> AskQuestionAsync(string question, IReadOnlyList<string> choices,
+		bool acceptFreeformAsAnswer)
+	{
+		var (text, rendered) = NoticeFormatter.Question(question, choices);
+		try { return await AwaitAnswerAsync(text, rendered, choices, acceptFreeformAsAnswer); }
 		catch (OperationCanceledException)
 		{
-			return new UserInputResponse { Answer = "(user canceled)", WasFreeform = true };
+			return new UserInputResponse { Answer = UserCanceledAnswer, WasFreeform = true };
 		}
 	}
 
@@ -838,24 +851,25 @@ public sealed partial class ChatService : IAsyncDisposable
 		if (choices.Count == 0 && !string.IsNullOrWhiteSpace(request.RecommendedAction))
 			choices.Add(request.RecommendedAction);
 		choices.Add(stay);
-		var response = await HandleUserInputRequestAsync(new UserInputRequest
+		var response = await AskQuestionAsync(
+			request.Summary + (string.IsNullOrWhiteSpace(request.PlanContent) ? "" : "\r\n\r\n" + request.PlanContent),
+			choices,
+			acceptFreeformAsAnswer: true);
+		var approved = !response.WasFreeform && response.Answer != stay && choices.Contains(response.Answer);
+		return new ExitPlanModeResult
 		{
-			Question = request.Summary + (string.IsNullOrWhiteSpace(request.PlanContent) ? "" : "\r\n\r\n" + request.PlanContent),
-			Choices = choices,
-			AllowFreeform = false,
-		}, new UserInputInvocation { SessionId = invocation.SessionId });
-		var approved = response.Answer != stay && choices.Contains(response.Answer);
-		return new ExitPlanModeResult { Approved = approved, SelectedAction = approved ? response.Answer : null };
+			Approved = approved,
+			SelectedAction = approved ? response.Answer : null,
+			Feedback = response.WasFreeform && response.Answer != UserCanceledAnswer ? response.Answer : null,
+		};
 	}
 
-	private async Task<AutoModeSwitchResponse> HandleAutoModeSwitchRequestAsync(AutoModeSwitchRequest request, AutoModeSwitchInvocation invocation)
+	internal async Task<AutoModeSwitchResponse> HandleAutoModeSwitchRequestAsync(AutoModeSwitchRequest request, AutoModeSwitchInvocation invocation)
 	{
-		var response = await HandleUserInputRequestAsync(new UserInputRequest
-		{
-			Question = "The selected model is rate-limited. Allow the runtime to choose a replacement?",
-			Choices = ["Switch once", "Always switch", "Keep this model"],
-			AllowFreeform = false,
-		}, new UserInputInvocation { SessionId = invocation.SessionId });
+		var response = await AskQuestionAsync(
+			"The selected model is rate-limited. Allow the runtime to choose a replacement?",
+			["Switch once", "Always switch", "Keep this model"],
+			acceptFreeformAsAnswer: false);
 		return response.Answer switch
 		{
 			"Switch once" => AutoModeSwitchResponse.Yes,
@@ -884,9 +898,12 @@ public sealed partial class ChatService : IAsyncDisposable
 			var (text, rendered) = request is PermissionRequestWorkflow workflow
 				? NoticeFormatter.WorkflowPermission(BuildWorkflowPermissionReview(workflow))
 				: NoticeFormatter.Permission(kind, detail);
-			var response = await AwaitAnswerAsync(text, rendered, ["yes", "no"], allowFreeform: false, isPermission: true);
+			var response = await AwaitAnswerAsync(text, rendered, ["yes", "no"],
+				acceptFreeformAsAnswer: true, isPermission: true);
 			if (response.Answer == "yes")
 				return await ApprovePermissionAsync(request, invocation);
+			if (response.WasFreeform)
+				return GitHub.Copilot.Rpc.PermissionDecision.Reject(response.Answer);
 		}
 		catch (OperationCanceledException)
 		{
@@ -2215,7 +2232,8 @@ public sealed partial class ChatService : IAsyncDisposable
 			: new AttachmentFile { Path = Path.GetFullPath(path), DisplayName = Path.GetFileName(path) };
 	}
 
-	private sealed record PendingQuestion(string Text, string Rendered, IReadOnlyList<string> Choices, bool AllowFreeform, bool IsPermission)
+	private sealed record PendingQuestion(string Text, string Rendered, IReadOnlyList<string> Choices,
+		bool AcceptFreeformAsAnswer, bool IsPermission)
 	{
 		public TaskCompletionSource<UserInputResponse> Completion { get; } =
 			new(TaskCreationOptions.RunContinuationsAsynchronously);

@@ -1222,19 +1222,18 @@ internal static class CoreChecks
 			new UserInputRequest { Question = "Second?", Choices = ["small", "large"], AllowFreeform = true }, new());
 		Check.True(chat.HasPendingQuestion, "Questions must remain pending until answered.");
 		Check.True(!chat.Transcript.Contains("Second?"), "Present only the oldest unanswered question.");
-		Check.Throws<InvalidOperationException>(() => chat.TryAnswerPending("invalid"));
-		Check.True(!first.IsCompleted && !second.IsCompleted, "An invalid answer must not release a question.");
-		Check.True(chat.TryAnswerPending("2"), "Answer the first question.");
-		Check.Equal("blue", (await first).Answer, "Resolve numbered choices to their text");
-		Check.Equal(false, (await first).WasFreeform, "A numbered choice is not freeform");
+		Check.True(chat.TryAnswerPending("custom color"), "Accept a custom answer even when the request disables freeform input.");
+		Check.Equal("custom color", (await first).Answer, "Return the custom answer to the runtime");
+		Check.Equal(true, (await first).WasFreeform, "Mark a custom answer as freeform");
 		Check.True(chat.Transcript.Contains("Second?"), "Show the next queued question.");
-		chat.TryAnswerPending("custom size");
-		Check.Equal("custom size", (await second).Answer, "Accept permitted freeform input");
-		Check.Equal(true, (await second).WasFreeform, "Mark freeform answers correctly");
+		chat.TryAnswerPending("2");
+		Check.Equal("large", (await second).Answer, "Resolve numbered choices to their text");
+		Check.Equal(false, (await second).WasFreeform, "A numbered choice is not freeform");
 		Check.True(!chat.HasPendingQuestion, "Clear answered questions immediately.");
-		Check.Equal("yes", ChatService.ResolveAnswer("1", ["yes", "no"], false, true).Answer, "Numbered permission approval");
-		Check.Equal("no", ChatService.ResolveAnswer("deny", ["yes", "no"], false, true).Answer, "Permission denial alias");
-		Check.Throws<InvalidOperationException>(() => ChatService.ResolveAnswer("maybe", ["yes", "no"], false, true));
+		Check.Equal("yes", ChatService.ResolveAnswer("1", ["yes", "no"], false, true)!.Answer, "Numbered permission approval");
+		Check.Equal("no", ChatService.ResolveAnswer("deny", ["yes", "no"], false, true)!.Answer, "Permission denial alias");
+		Check.True(ChatService.ResolveAnswer("use a safer command", ["yes", "no"], false, true) is null,
+			"Leave unmatched control text available for the normal prompt path.");
 		var workflow = chat.HandlePermissionRequestAsync(new PermissionRequestWorkflow
 		{
 			ApprovalKey = "workflow:release",
@@ -1258,8 +1257,11 @@ internal static class CoreChecks
 			&& chat.Transcript.Contains("Active time: 600 seconds")
 			&& chat.Transcript.Contains("1. Build: Compile and test."),
 			"Present workflow identity, phases, and effective limits before approval.");
-		chat.TryAnswerPending("no");
-		await workflow;
+		chat.TryAnswerPending("Use a read-only validation instead.");
+		Check.True(await workflow is GitHub.Copilot.Rpc.PermissionDecisionReject
+			{
+				Feedback: "Use a read-only validation instead.",
+			}, "Reject a permission safely while forwarding custom feedback to the model.");
 		var plan = chat.HandleExitPlanModeRequestAsync(new ExitPlanModeRequest
 		{
 			Summary = "Implement the plan?", Actions = ["interactive", "autopilot"],
@@ -1273,6 +1275,22 @@ internal static class CoreChecks
 		}, new());
 		chat.TryAnswerPending("3");
 		Check.True(!(await stay).Approved, "Allow remaining in Plan without executing.");
+		var revise = chat.HandleExitPlanModeRequestAsync(new ExitPlanModeRequest
+		{
+			Summary = "Revise the plan?", Actions = ["interactive", "autopilot"],
+		}, new());
+		chat.TryAnswerPending("Add a rollback step before implementation.");
+		var revision = await revise;
+		Check.True(!revision.Approved
+			&& revision.SelectedAction is null
+			&& revision.Feedback == "Add a rollback step before implementation.",
+			"Return custom plan feedback without approving an action.");
+		var switchMode = chat.HandleAutoModeSwitchRequestAsync(new(), new());
+		Check.True(!chat.TryAnswerPending("Work on a different task instead.")
+			&& chat.HasPendingQuestion,
+			"Leave custom auto-switch text available for the normal prompt path.");
+		chat.TryAnswerPending("3");
+		Check.Equal(AutoModeSwitchResponse.No, await switchMode, "Keep explicit automatic-switch choices working.");
 		var canceled = chat.HandleUserInputRequestAsync(new UserInputRequest { Question = "Canceled?" }, new());
 		await chat.DisposeAsync();
 		Check.Equal("(user canceled)", (await canceled).Answer, "Disposal must release question handlers");

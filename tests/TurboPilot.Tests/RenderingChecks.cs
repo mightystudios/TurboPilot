@@ -58,7 +58,7 @@ internal static class RenderingChecks
 	private static void CheckNotices()
 	{
 		var (questionText, questionRendered) = NoticeFormatter.Question(
-			"Pick a **plan**", ["Ship it", "Keep planning"], allowFreeform: true);
+			"Pick a **plan**", ["Ship it", "Keep planning"]);
 		Check.True(questionText.StartsWith("Question: Pick a **plan**", StringComparison.Ordinal)
 			&& questionText.Contains("1. Ship it  |  2. Keep planning")
 			&& questionText.Contains("(Reply with an option number, its text, or your own answer and press Send.)"),
@@ -77,16 +77,21 @@ internal static class RenderingChecks
 		Check.True(permissionRendered.Contains("<code>dir &lt;C:\\a &amp; b&gt;</code>"),
 			"Escape the requested operation and show it as code.");
 		Check.True(!permissionRendered.Contains("<C:"), "A command can never be read as markup.");
+		Check.True(permissionText.Contains("or your own answer")
+			&& permissionRendered.Contains("or your own answer"),
+			"Offer a custom reply for permission requests.");
 
 		var workflow = NoticeFormatter.WorkflowPermission(new WorkflowPermissionReview(
 			"release <prod>", "run", "Deploy & verify", ["Build: compile", "Review"],
 			"12.5", "600 seconds", "4", "20", true));
 		Check.True(workflow.Text.Contains("Workflow: release <prod>")
 			&& workflow.Text.Contains("AI credits: 12.5")
-			&& workflow.Text.Contains("1. Build: compile"),
+			&& workflow.Text.Contains("1. Build: compile")
+			&& workflow.Text.Contains("or your own answer"),
 			"Show the complete workflow review in Raw.");
 		Check.True(workflow.Rendered.Contains("Workflow: release &lt;prod&gt;&#10;Operation: run")
 			&& workflow.Rendered.Contains("Persistent approval: available")
+			&& workflow.Rendered.Contains("or your own answer")
 			&& !workflow.Rendered.Contains("<prod>"),
 			"Show and escape the complete workflow review in Rendered.");
 
