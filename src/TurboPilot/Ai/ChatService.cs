@@ -56,6 +56,8 @@ public sealed partial class ChatService : IAsyncDisposable
 	private bool _startAttempted;
 	private bool _historyActive;
 	private readonly List<RenderPart> _renderParts = [];
+	private readonly List<OutputPageRecord> _outputPages = [];
+	private string _currentOutputPageId = "";
 	private readonly Dictionary<string, StringBuilder> _messageBuffers = [];
 	private bool _renderWriteFailed;
 	private WorkspaceFileIndex? _fileIndex;
@@ -117,6 +119,11 @@ public sealed partial class ChatService : IAsyncDisposable
 	public event Action<string>? TranscriptReceived;
 	public event Action<string>? RenderedReceived;
 	public event Action<string>? RenderedReplaced;
+	public event Action<IReadOnlyList<OutputPageContent>>? OutputPagesLoaded;
+	public event Action<string>? OutputPageStarted;
+	public event Action<string, string>? RawPageReceived;
+	public event Action<string, string>? RenderedPageReceived;
+	public event Action<string, string>? RenderedPageReplaced;
 	public event Action<string>? NoticeReceived;
 	public event Action<string>? ErrorReceived;
 	public event Action? StateChanged;
@@ -245,19 +252,29 @@ public sealed partial class ChatService : IAsyncDisposable
 			if (resumeId is not null)
 			{
 				_record = _store.Load(resumeId);
-				var transcript = _store.ReadTranscript(resumeId);
-				var rendered = _store.ReadRenderedTranscript(resumeId);
+				var pages = _store.ReadOutputPages(_record);
+				var transcript = string.Concat(pages.Select(page => page.Raw));
+				var rendered = string.Concat(pages.Select(page => page.Rendered));
 				lock (_sync)
 				{
 					_transcript.Append(transcript);
-					_renderParts.Add(new RenderPart(null, rendered));
+					_outputPages.AddRange(OutputPagePersistence.Clone(_record.OutputPages!));
+					_currentOutputPageId = _outputPages[^1].Id;
+					foreach (var page in pages)
+						_renderParts.Add(new RenderPart(null, page.Id, page.Rendered));
 					ContextUsedTokens = _record.ContextUsedTokens;
 					_sessionAicNano = _record.AicNano;
 					if (ContextWindowTokens <= 0)
 						ContextWindowTokens = _record.ContextWindowTokens;
 				}
+				OutputPagesLoaded?.Invoke(pages);
 				TranscriptReceived?.Invoke(transcript);
 				RenderedReceived?.Invoke(rendered);
+			}
+			else
+			{
+				InitializeOutputPages(SessionId);
+				OutputPageStarted?.Invoke(_currentOutputPageId);
 			}
 
 			SessionConfigBase config = resumeId is null
@@ -290,11 +307,15 @@ public sealed partial class ChatService : IAsyncDisposable
 			lock (_sync)
 			{
 				if (_record is null)
+				{
 					_record = _store.Create(SessionId, _options, _transcript.ToString());
+					ApplyOutputPageMetadata();
+				}
 				else
 				{
 					_store.WriteTranscript(SessionId, _transcript.ToString());
 					_store.WriteRenderedTranscript(SessionId, RenderedTranscript);
+					SynchronizeRenderedPageStarts();
 				}
 				_historyActive = true;
 				_record.Options = _options;
@@ -1483,6 +1504,8 @@ public sealed partial class ChatService : IAsyncDisposable
 	{
 		lock (_sync)
 		{
+			if (request)
+				StartOutputPage();
 			if (_record is not null && !string.IsNullOrWhiteSpace(prompt))
 			{
 				_record.Prompts.Add(prompt);
@@ -1537,6 +1560,8 @@ public sealed partial class ChatService : IAsyncDisposable
 			}
 
 			TranscriptReceived?.Invoke(text);
+			EnsureOutputPage();
+			RawPageReceived?.Invoke(_currentOutputPageId, text);
 			AppendRendered(rendered ?? text, messageId);
 		}
 	}
@@ -1577,15 +1602,20 @@ public sealed partial class ChatService : IAsyncDisposable
 				}
 			}
 			TranscriptReceived?.Invoke(text);
+			EnsureOutputPage();
+			RawPageReceived?.Invoke(_currentOutputPageId, text);
 		}
 	}
 
 	private void AppendRendered(string text, string? messageId)
 	{
-		if (_renderParts.LastOrDefault() is { } previous && previous.MessageId == messageId)
+		EnsureOutputPage();
+		if (_renderParts.LastOrDefault() is { } previous
+			&& previous.MessageId == messageId
+			&& previous.PageId == _currentOutputPageId)
 			previous.Text.Append(text);
 		else
-			_renderParts.Add(new RenderPart(messageId, text));
+			_renderParts.Add(new RenderPart(messageId, _currentOutputPageId, text));
 		if (_record is not null && _historyActive)
 		{
 			try
@@ -1604,6 +1634,7 @@ public sealed partial class ChatService : IAsyncDisposable
 			}
 		}
 		RenderedReceived?.Invoke(text);
+		RenderedPageReceived?.Invoke(_currentOutputPageId, text);
 	}
 
 	// Links are prepared off the event thread because resolving names can touch the file system.
@@ -1641,11 +1672,13 @@ public sealed partial class ChatService : IAsyncDisposable
 		{
 			var parts = _renderParts.Where(part => part.MessageId == messageId).ToList();
 			if (parts.Count == 0) return;
+			var pageId = parts[0].PageId;
 			parts[0].Text.Clear().Append(markdown).Append("\r\n\r\n");
 			foreach (var part in parts.Skip(1))
 				_renderParts.Remove(part);
 			SaveRendered();
 			RenderedReplaced?.Invoke(RenderedTranscript);
+			RenderedPageReplaced?.Invoke(pageId, RenderedPageText(pageId));
 		}
 	}
 
@@ -1655,6 +1688,8 @@ public sealed partial class ChatService : IAsyncDisposable
 		try
 		{
 			_store.WriteRenderedTranscript(_record.SessionId, RenderedTranscript);
+			SynchronizeRenderedPageStarts();
+			_store.Save(_record);
 			_renderWriteFailed = false;
 		}
 		catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
@@ -2239,9 +2274,71 @@ public sealed partial class ChatService : IAsyncDisposable
 			new(TaskCreationOptions.RunContinuationsAsynchronously);
 	}
 
-	private sealed class RenderPart(string? messageId, string text)
+	private void InitializeOutputPages(string sessionId)
+	{
+		_outputPages.Clear();
+		_outputPages.Add(new OutputPageRecord
+		{
+			Id = OutputPagePersistence.PageId(sessionId, 0),
+			RawStart = 0,
+			RenderedStart = 0,
+		});
+		_currentOutputPageId = _outputPages[0].Id;
+	}
+
+	private void EnsureOutputPage()
+	{
+		if (_outputPages.Count > 0)
+			return;
+		InitializeOutputPages(SessionId ?? "unsaved");
+	}
+
+	private void StartOutputPage()
+	{
+		EnsureOutputPage();
+		var page = new OutputPageRecord
+		{
+			Id = OutputPagePersistence.PageId(SessionId ?? "unsaved", _outputPages.Count),
+			RawStart = _transcript.Length,
+			RenderedStart = _renderParts.Sum(part => part.Text.Length),
+		};
+		_outputPages.Add(page);
+		_currentOutputPageId = page.Id;
+		ApplyOutputPageMetadata();
+		OutputPageStarted?.Invoke(page.Id);
+	}
+
+	private void ApplyOutputPageMetadata()
+	{
+		if (_record is null)
+			return;
+		_record.OutputPageFormatVersion = OutputPagePersistence.CurrentFormatVersion;
+		_record.OutputPages = OutputPagePersistence.Clone(_outputPages);
+	}
+
+	private void SynchronizeRenderedPageStarts()
+	{
+		var lengths = _renderParts
+			.GroupBy(part => part.PageId, StringComparer.Ordinal)
+			.ToDictionary(group => group.Key, group => group.Sum(part => part.Text.Length), StringComparer.Ordinal);
+		var renderedStart = 0;
+		foreach (var page in _outputPages)
+		{
+			page.RenderedStart = renderedStart;
+			renderedStart += lengths.GetValueOrDefault(page.Id);
+		}
+		ApplyOutputPageMetadata();
+	}
+
+	private string RenderedPageText(string pageId) =>
+		string.Concat(_renderParts
+			.Where(part => part.PageId == pageId)
+			.Select(part => part.Text.ToString()));
+
+	private sealed class RenderPart(string? messageId, string pageId, string text)
 	{
 		public string? MessageId { get; } = messageId;
+		public string PageId { get; } = pageId;
 		public StringBuilder Text { get; } = new(text);
 	}
 }

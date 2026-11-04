@@ -1194,6 +1194,10 @@ internal static class CoreChecks
 		Check.Equal(13_000_000_000L, loaded.AicNano, "Restore credit usage");
 		Check.True(loaded.UsesApiKey, "Remember when resuming needs credentials without storing the credentials.");
 		Check.Equal("**You:** first\r\nstreamed answer\r\n", workspace.Store.ReadTranscript(record.SessionId), "Restore exactly the saved transcript");
+		var savedPages = workspace.Store.ReadOutputPages(loaded);
+		Check.Equal(1, savedPages.Count, "A new saved transcript starts with one indexed output page.");
+		Check.Equal(workspace.Store.ReadTranscript(record.SessionId), savedPages[0].Raw,
+			"The page index must preserve the complete Raw transcript.");
 		Check.True(!File.ReadAllText(Path.Combine(workspace.HistoryDirectory, "saved-123.json")).Contains("DO_NOT_PERSIST"), "Do not persist provider credentials.");
 		Check.True(!Directory.EnumerateFiles(workspace.HistoryDirectory, "*.tmp").Any(), "Atomic saves must not leave temporary files.");
 		workspace.Write("history\\broken.json", "{broken");
@@ -1211,6 +1215,58 @@ internal static class CoreChecks
 		Check.Throws<InvalidOperationException>(() => MainWindow.RestoreSessionOptions(loaded, settings));
 		var publicEndpoint = new SessionRecord { SessionId = "public", Options = options, UsesApiKey = false };
 		Check.Equal("", MainWindow.RestoreSessionOptions(publicEndpoint, settings).ByokApiKey, "Never reuse a credential belonging to another endpoint");
+
+		var legacy = workspace.Store.Create("legacy-pages", options, "");
+		legacy.OutputPageFormatVersion = 0;
+		legacy.OutputPages = null;
+		legacy.Prompts = ["first", "2", "second"];
+		legacy.Requests = ["first", "second"];
+		var raw = "session preamble\r\n"
+			+ "\r\n**You:** first\r\n\r\nfirst reply\r\n"
+			+ "\r\n**You:** 2\r\n\r\ncontinued reply\r\n"
+			+ "\r\n**You:** second\r\n\r\nsecond reply\r\n";
+		static string RenderedPrompt(string prompt) =>
+			$"\r\n<!--kp-user-prompt-start-->\r\n\r\n**You:** {prompt}"
+			+ "\r\n\r\n<!--kp-user-prompt-end-->\r\n\r\n";
+		var rendered = "rendered preamble\r\n"
+			+ RenderedPrompt("first") + "first reply\r\n"
+			+ RenderedPrompt("2") + "continued reply\r\n"
+			+ RenderedPrompt("second") + "second reply\r\n";
+		workspace.Store.WriteTranscript(legacy.SessionId, raw);
+		workspace.Store.WriteRenderedTranscript(legacy.SessionId, rendered);
+		workspace.Store.Save(legacy);
+		var legacyPages = workspace.Store.ReadOutputPages(workspace.Store.Load(legacy.SessionId));
+		Check.Equal(3, legacyPages.Count, "Infer a preamble and one page per legacy top-level request.");
+		Check.True(legacyPages[1].Raw.Contains("**You:** 2")
+			&& !legacyPages[1].Raw.Contains("**You:** second"),
+			"Keep a question answer on the request page that caused it.");
+		Check.True(legacyPages[2].Rendered.Contains("second reply"),
+			"Keep Raw and Rendered legacy page boundaries aligned.");
+
+		var ambiguous = workspace.Store.Create("ambiguous-pages", options, "unmatched legacy transcript");
+		ambiguous.OutputPageFormatVersion = 0;
+		ambiguous.OutputPages = null;
+		ambiguous.Prompts = ["missing prompt"];
+		workspace.Store.Save(ambiguous);
+		var ambiguousPages = workspace.Store.ReadOutputPages(workspace.Store.Load(ambiguous.SessionId));
+		Check.Equal(1, ambiguousPages.Count, "Ambiguous legacy transcripts must fall back to one page.");
+		Check.Equal("unmatched legacy transcript", ambiguousPages[0].Raw,
+			"Legacy fallback must not change transcript content.");
+
+		var duplicate = workspace.Store.Create("duplicate-legacy-pages", options, "");
+		duplicate.OutputPageFormatVersion = 0;
+		duplicate.OutputPages = null;
+		duplicate.Prompts = ["same", "same"];
+		duplicate.Requests = ["same"];
+		workspace.Store.WriteTranscript(duplicate.SessionId,
+			"preamble" + "\r\n**You:** same\r\n\r\nanswer\r\n"
+			+ "\r\n**You:** same\r\n\r\nrequest\r\n");
+		workspace.Store.WriteRenderedTranscript(duplicate.SessionId,
+			"preamble" + RenderedPrompt("same") + "answer\r\n"
+			+ RenderedPrompt("same") + "request\r\n");
+		workspace.Store.Save(duplicate);
+		Check.Equal(1, workspace.Store.ReadOutputPages(workspace.Store.Load(duplicate.SessionId)).Count,
+			"Ambiguous duplicate legacy prompts must use the lossless single-page fallback.");
 	}
 
 	private static async Task CheckQuestionsAsync()

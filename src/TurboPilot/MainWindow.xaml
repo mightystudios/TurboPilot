@@ -147,13 +147,40 @@
                     <RowDefinition Height="Auto"/>
                     <RowDefinition Height="*"/>
                 </Grid.RowDefinitions>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="24"/>
+                    <ColumnDefinition Width="*"/>
+                </Grid.ColumnDefinitions>
 
-                <Label x:Name="labelModelOutput" Grid.Row="0"
+                <Label x:Name="labelModelOutput" Grid.Row="0" Grid.ColumnSpan="2"
 						Content="Model Output" Target="{Binding ElementName=outputTabs}"
 						Foreground="{Binding Foreground, ElementName=richTextBoxOutput}"/>
 
+                <Border x:Name="outputPageGutter" Grid.Row="1" Grid.Column="0"
+                        Background="{DynamicResource Turboland.Brush.ControlFace}"
+                        BorderBrush="{DynamicResource Turboland.Brush.ControlShadow}"
+                        BorderThickness="1">
+                    <Grid>
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="*"/>
+                            <RowDefinition Height="Auto"/>
+                        </Grid.RowDefinitions>
+                        <Button x:Name="buttonOutputPagePrev" Grid.Row="0"
+                                Style="{StaticResource HistoryArrowButton}"
+                                Content="&#x25B2;"
+                                ToolTip="Older output page"
+                                Click="ButtonOutputPagePrev_Click"/>
+                        <Button x:Name="buttonOutputPageNext" Grid.Row="2"
+                                Style="{StaticResource HistoryArrowButton}"
+                                Content="&#x25BC;"
+                                ToolTip="Newer output page"
+                                Click="ButtonOutputPageNext_Click"/>
+                    </Grid>
+                </Border>
+
                 <!-- No Style key: use the theme's implicit tab styles. -->
-                <TabControl x:Name="outputTabs" Grid.Row="1" Padding="2">
+                <TabControl x:Name="outputTabs" Grid.Row="1" Grid.Column="1" Padding="2">
                     <TabItem Header="Rendered">
                         <Grid>
                             <Grid.ColumnDefinitions>

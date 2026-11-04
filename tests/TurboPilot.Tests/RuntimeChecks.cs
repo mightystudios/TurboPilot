@@ -5,6 +5,7 @@ using System.Text.Json;
 using GitHub.Copilot;
 using TurboPilot.Ai;
 using TurboPilot.Permissions;
+using TurboPilot.Sessions;
 
 namespace TurboPilot.Tests;
 
@@ -99,6 +100,8 @@ internal static class RuntimeChecks
 				"Style only the Rendered user prompt echo.");
 			firstTranscript = chat.Transcript;
 			Check.Equal(firstTranscript, workspace.Store.ReadTranscript(sessionId), "Persist streamed output before ending the session");
+			Check.Equal(2, workspace.Store.ReadOutputPages(workspace.Store.Load(sessionId)).Count,
+				"Persist the session preamble and first request as separate output pages.");
 			Check.True(chat.ContextUsedTokens > 0, "Receive runtime context usage.");
 			Check.True(!chat.IsWorking, "Return to idle.");
 			Check.Equal(0, errors.Count, "The running session must not hide errors");
@@ -111,9 +114,12 @@ internal static class RuntimeChecks
 		await using (var resumed = workspace.CreateChat())
 		{
 			var resumedErrors = new ConcurrentQueue<string>();
+			IReadOnlyList<OutputPageContent>? loadedPages = null;
 			resumed.ErrorReceived += resumedErrors.Enqueue;
+			resumed.OutputPagesLoaded += pages => loadedPages = pages;
 			await resumed.ResumeAsync(sessionId, options).WaitAsync(TimeSpan.FromSeconds(45));
 			Check.True(resumed.Transcript.StartsWith(firstTranscript, StringComparison.Ordinal), "Recall the exact prior display transcript.");
+			Check.Equal(2, loadedPages!.Count, "Restore persisted output pages before continuing the session.");
 			Check.Equal("first prompt marker", resumed.Record!.Prompts.Single(), "Recall prompt history by session ID");
 			provider.Replies.Enqueue(new LocalProvider.Reply("Resumed answer."));
 			await SendAndWaitAsync(resumed, "second prompt marker");
@@ -121,6 +127,8 @@ internal static class RuntimeChecks
 			Check.True(request.Contains("first prompt marker") && request.Contains("Hello streaming world."), "Restore the actual conversation context, not only the display.");
 			Check.True(request.Contains("EDITED_APPLICATION_INSTRUCTIONS_SENTINEL"), "Read the edited central instructions into the resumed runtime.");
 			Check.Equal(resumed.Transcript, workspace.Store.ReadTranscript(sessionId), "Continue the same persisted transcript");
+			Check.Equal(3, workspace.Store.ReadOutputPages(workspace.Store.Load(sessionId)).Count,
+				"Append a new output page when the resumed session receives another request.");
 			Console.WriteLine("PASS cold resume with restored runtime context and prompt history");
 
 			var slow = new LocalProvider.Reply("Slow response should be interrupted.", Hold: true);

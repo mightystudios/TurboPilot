@@ -45,6 +45,8 @@ public sealed class SessionRecord
 	public List<string> Prompts { get; set; } = [];
 	// Prompts also holds answers to model questions; Requests holds only the user's own prompts.
 	public List<string> Requests { get; set; } = [];
+	public int OutputPageFormatVersion { get; set; }
+	public List<OutputPageRecord>? OutputPages { get; set; }
 	public int ContextUsedTokens { get; set; }
 	public int ContextWindowTokens { get; set; }
 	public long AicNano { get; set; }
@@ -136,6 +138,16 @@ public sealed class SessionStore
 			SessionId = sessionId,
 			Options = options,
 			UsesApiKey = options.UseByok && !string.IsNullOrWhiteSpace(options.ByokApiKey),
+			OutputPageFormatVersion = OutputPagePersistence.CurrentFormatVersion,
+			OutputPages =
+			[
+				new OutputPageRecord
+				{
+					Id = OutputPagePersistence.PageId(sessionId, 0),
+					RawStart = 0,
+					RenderedStart = 0,
+				},
+			],
 		};
 		File.WriteAllText(transcriptPath, transcript);
 		File.WriteAllText(FilePath(sessionId, ".rendered.md"), transcript);
@@ -194,6 +206,17 @@ public sealed class SessionStore
 	{
 		var path = FilePath(sessionId, ".rendered.md");
 		return File.Exists(path) ? Rendering.NoticeFormatter.Repair(File.ReadAllText(path)) : ReadTranscript(sessionId);
+	}
+
+	public IReadOnlyList<OutputPageContent> ReadOutputPages(SessionRecord record)
+	{
+		var raw = ReadTranscript(record.SessionId);
+		var renderedPath = FilePath(record.SessionId, ".rendered.md");
+		var rendered = File.Exists(renderedPath) ? File.ReadAllText(renderedPath) : raw;
+		var pages = OutputPagePersistence.Load(record, raw, rendered, out var pageRecords);
+		record.OutputPageFormatVersion = OutputPagePersistence.CurrentFormatVersion;
+		record.OutputPages = pageRecords;
+		return pages;
 	}
 
 	public void AppendTranscript(string sessionId, string text) =>

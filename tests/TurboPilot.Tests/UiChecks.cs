@@ -557,7 +557,20 @@ internal static class UiChecks
 			Check.Equal(chat.Transcript, window.OutputText, "The main window must display the service transcript");
 			var raw = Control<RichTextBox>(window, "richTextBoxOutput");
 			var rawText = new TextRange(raw.Document.ContentStart, raw.Document.ContentEnd).Text;
-			Check.Equal(Normalize(window.OutputText), Normalize(rawText), "The Raw tab must contain the complete transcript");
+			Check.True(rawText.Contains("UI prompt marker") && rawText.Contains("UI streaming reply")
+				&& !rawText.Contains("Commands:"),
+				"The Raw tab must materialize only the current request page.");
+			Check.True(Control<Button>(window, "buttonOutputPagePrev").IsEnabled
+				&& !Control<Button>(window, "buttonOutputPageNext").IsEnabled,
+				"The output gutter must offer the older page from the newest page.");
+			Click(window, "buttonOutputPagePrev");
+			rawText = new TextRange(raw.Document.ContentStart, raw.Document.ContentEnd).Text;
+			Check.True(rawText.Contains("Commands:") && !rawText.Contains("UI streaming reply"),
+				"The older output page must contain the session preamble without the request reply.");
+			Click(window, "buttonOutputPageNext");
+			rawText = new TextRange(raw.Document.ContentStart, raw.Document.ContentEnd).Text;
+			Check.True(rawText.Contains("UI streaming reply"),
+				"Returning to the newest output page must restore the request reply.");
 			Check.Equal("", Input(window), "Clear accepted input");
 			Check.True(MainWindow.IsSendShortcut(Key.Enter, ModifierKeys.Control)
 				&& MainWindow.IsSendShortcut(Key.Return, ModifierKeys.Control), "Ctrl+Enter must send.");
@@ -689,7 +702,10 @@ internal static class UiChecks
 			await ChoosePastSessionAsync(application, window, sessionId, "buttonView");
 			Check.Equal(workspace.Store.ReadTranscript(sessionId), window.OutputText, "View saved history without starting a runtime");
 			Check.True(!window.IsSessionActive, "Offline viewing must not create a live session.");
-			await CheckTranscriptOpenedAtTopAsync(window, webView, "Viewing saved history", renderedRestoreSentinel);
+			await CheckTranscriptOpenedAtTopAsync(window, webView, "Viewing saved history", "Session");
+			while (Control<Button>(window, "buttonOutputPageNext").IsEnabled)
+				Click(window, "buttonOutputPageNext");
+			await CheckTranscriptOpenedAtEndAsync(window, webView, "Paging through saved history", renderedRestoreSentinel);
 			await ChoosePastSessionAsync(application, window, sessionId, "buttonResume");
 			await Check.UntilAsync(() => window.IsSessionActive && Status(window).StartsWith("Ready.."),
 				"The Past Sessions menu did not resume the selected session.", timeoutSeconds: 45);

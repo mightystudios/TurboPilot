@@ -29,6 +29,8 @@ Start a session with **Session -> Begin Session**. Choose a workspace, provider,
 
 TurboPilot displays streamed text in **Raw** and **Rendered** tabs. Rendered output supports Markdown, Mermaid diagrams, links, and local image previews. Questions and permission requests appear as reply cards; answer with a choice number, choice text, or your own freeform response. Custom replies are sent to the model instead of being rejected.
 
+The output tabs share a left-side page gutter. Each top-level user request starts a page, while the normal right-side scrollbar moves through the lines on that page. Saved and resumed sessions restore the same pages; older records are divided at validated prompt boundaries when possible and otherwise remain one complete legacy page.
+
 Clicking a rendered file link opens it with the operating system's registered application. If no application is registered for that file type, TurboPilot opens it in Visual Studio Code.
 
 ## Workspace tools
