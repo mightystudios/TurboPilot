@@ -673,6 +673,24 @@ internal static class UiChecks
 			window.Show();
 			await Check.UntilAsync(() => Field<bool>(window, "_webViewReady"), "The rendered output did not initialize.");
 			var outputTabs = Control<TabControl>(window, "outputTabs");
+			Check.True(window.OutputText.Contains("# Welcome to TurboPilot", StringComparison.Ordinal)
+				&& window.OutputText.Contains("Help > Show Help", StringComparison.Ordinal),
+				"The initial Raw output must contain the concise startup greeting.");
+			var greetingRendered = false;
+			for (var attempt = 0; attempt < 100 && !greetingRendered; attempt++)
+			{
+				using var result = JsonDocument.Parse(await webView.CoreWebView2.ExecuteScriptAsync(
+					"({"
+					+ " title: document.getElementById('output').textContent.includes('Welcome to TurboPilot'),"
+					+ " help: document.getElementById('output').textContent.includes('Help > Show Help')"
+					+ "})"));
+				greetingRendered = result.RootElement.GetProperty("title").GetBoolean()
+					&& result.RootElement.GetProperty("help").GetBoolean();
+				if (!greetingRendered)
+					await Task.Delay(50);
+			}
+			Check.True(greetingRendered,
+				"The initial Rendered output must display the startup greeting.");
 			outputTabs.SelectedIndex = 1;
 			await window.Dispatcher.InvokeAsync(() => { }, DispatcherPriority.Loaded);
 			outputTabs.SelectedIndex = 0;

@@ -184,6 +184,11 @@ public partial class MainWindow : TurbolandWindow
 		richTextBoxOutput.Document.Blocks.Add(new System.Windows.Documents.Paragraph(_rawOutputRun));
 		UpdateOutputPageButtons();
 
+		// The initial page is a short welcome, not the full Help document.
+		// Starting or resuming a session replaces it with session output,
+		// while Help remains available in its separate modeless window.
+		AppendOutput(LoadStartupGreeting());
+
 		// Apply the requested transcript position once the Raw view is
 		// realized. Offline history may be loaded before that point.
 		richTextBoxOutput.Loaded += RichTextBoxOutput_FirstRealized;
@@ -202,6 +207,27 @@ public partial class MainWindow : TurbolandWindow
 
 		// No session is active until the user starts or resumes one.
 		SetSessionActive(false);
+	}
+
+	private static string LoadStartupGreeting()
+	{
+		var path = System.IO.Path.Combine(
+			AppContext.BaseDirectory,
+			"Assets",
+			"StartupGreeting.md");
+		try
+		{
+			var text = System.IO.File.ReadAllText(path);
+			return text.Replace("\r\n", "\n").Replace("\n", "\r\n");
+		}
+		catch (Exception ex) when (ex is IOException
+			or UnauthorizedAccessException
+			or System.Security.SecurityException)
+		{
+			return "# Welcome to TurboPilot\r\n\r\n"
+				+ "Choose **Session > Begin Session** to begin.\r\n\r\n"
+				+ $"[error] Startup greeting could not be loaded: {ex.Message}\r\n";
+		}
 	}
 
 	// -- Session state ---------------------------------------------------------

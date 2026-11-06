@@ -44,6 +44,7 @@ The publish folder must contain at least:
 
 - `TurboPilot.exe`
 - `web\output.html`
+- `Assets\StartupGreeting.md`
 - `Assets\ShowHelp.md`
 - `SessionTools\README.md`
 - `session-launch-capabilities.json`

@@ -52,7 +52,7 @@
 			<CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
 		</None>
 
-		<!-- Sample transcript shown in both output views at startup. -->
+		<!-- Startup greeting, Help, instructions, and other bundled assets. -->
 		<None Include="Assets\**">
 			<CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
 		</None>
