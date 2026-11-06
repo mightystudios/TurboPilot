@@ -5,7 +5,7 @@
 <h1 align="center">TurboPilot</h1>
 
 <p align="center">
-  <strong>A desktop command center for serious AI coding sessions.</strong>
+  <strong>Retro-styled command center for serious AI coding sessions.</strong>
 </p>
 
 <p align="center">
