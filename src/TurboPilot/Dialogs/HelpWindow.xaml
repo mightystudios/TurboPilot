@@ -1,0 +1,22 @@
+<ctl:TurbolandWindow x:Class="TurboPilot.Dialogs.HelpWindow"
+					xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+					xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+					xmlns:ctl="clr-namespace:TurbolandTheme.Wpf.Controls;assembly=TurbolandTheme.Wpf"
+					xmlns:wv2="clr-namespace:Microsoft.Web.WebView2.Wpf;assembly=Microsoft.Web.WebView2.Wpf"
+					Title="TURBO-PILOT HELP"
+					Width="900" Height="820"
+					MinWidth="560" MinHeight="480"
+					ShowInTaskbar="False"
+					WindowStartupLocation="CenterOwner">
+	<Grid Margin="4">
+		<wv2:WebView2 x:Name="webViewHelp"/>
+		<Border x:Name="errorPanel"
+				Visibility="Collapsed"
+				Background="{DynamicResource Turboland.Brush.DesktopBackground}"
+				Padding="24">
+			<TextBlock x:Name="errorText"
+					Foreground="{DynamicResource Turboland.Brush.WindowForeground}"
+					TextWrapping="Wrap"/>
+		</Border>
+	</Grid>
+</ctl:TurbolandWindow>

@@ -6,7 +6,6 @@ using System.Text.Json;
 using System.Windows;
 using System.Windows.Media;
 using System.Windows.Media.Animation;
-using Microsoft.Web.WebView2.Wpf;
 using TurbolandTheme.Wpf.Controls;
 using TurboPilot.Attachments;
 using TurboPilot.Ai;
@@ -22,8 +21,7 @@ namespace TurboPilot;
 
 public partial class MainWindow : TurbolandWindow
 {
-	// The single file: URI that the WebView2 is allowed to navigate to.
-	private string? _outputHtmlUri;
+	private readonly RenderedWebViewHost _renderedWebView;
 	private bool _webViewReady = false;
 	private const int RenderedUpdateBatchMilliseconds = 60;
 	private readonly System.Windows.Threading.DispatcherTimer _renderedUpdateTimer;
@@ -33,8 +31,8 @@ public partial class MainWindow : TurbolandWindow
 	private bool _renderedFlushRunning;
 	private Task _renderedFlushTask = Task.CompletedTask;
 
-	// The startup help and offline history open at the top. A resumed live
-	// session opens at the end. Keep each request until its view is ready.
+	// Offline history opens at the top. A resumed live session opens at the
+	// end. Keep each request until its view is ready.
 	private TranscriptPosition _renderedTranscriptPosition = TranscriptPosition.Top;
 	private TranscriptPosition _rawTranscriptPosition = TranscriptPosition.Top;
 
@@ -128,6 +126,7 @@ public partial class MainWindow : TurbolandWindow
 	private double _aic;
 	private bool _showAic;
 	private bool _statusMarqueeUpdatePending;
+	private HelpWindow? _helpWindow;
 
 	public MainWindow() : this(new SessionStore())
 	{
@@ -154,6 +153,15 @@ public partial class MainWindow : TurbolandWindow
 		_webViewDataFolder = webViewDataFolder ?? System.IO.Path.Combine(
 			Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "TurboPilot", "webview2-default");
 		InitializeComponent();
+		_renderedWebView = new RenderedWebViewHost(
+			webViewOutput,
+			_webViewDataFolder,
+			LaunchInDefaultBrowser);
+		_renderedWebView.MessageReceived += HandleWebMessage;
+		_renderedWebView.CodeCopyCompleted += (id, succeeded) =>
+			PushToRenderer($"setCodeCopyResult({JsString(id)}, {(succeeded ? "true" : "false")})");
+		_renderedWebView.Ready += RenderedWebView_Ready;
+		_renderedWebView.Failed += RenderedWebView_Failed;
 		_renderedUpdateTimer = new System.Windows.Threading.DispatcherTimer(
 			System.Windows.Threading.DispatcherPriority.Background, Dispatcher)
 		{
@@ -176,17 +184,8 @@ public partial class MainWindow : TurbolandWindow
 		richTextBoxOutput.Document.Blocks.Add(new System.Windows.Documents.Paragraph(_rawOutputRun));
 		UpdateOutputPageButtons();
 
-		// Paint the WebView2 surface with the desktop blue before any
-		// stylesheet lands, so there is no white flash on first show.
-		webViewOutput.DefaultBackgroundColor = BorlandVisionTheme.DesktopBackgroundColorGdi;
-
-		// Seed the transcript through the shared API so Raw and Rendered
-		// start in sync.
-		AppendOutput(LoadHelpDocument());
-
-		// Appending leaves the caret at the end, which is where the view
-		// scrolls when it is first realized. The opening sample is read from
-		// the top, so rewind it once the text view exists.
+		// Apply the requested transcript position once the Raw view is
+		// realized. Offline history may be loaded before that point.
 		richTextBoxOutput.Loaded += RichTextBoxOutput_FirstRealized;
 
 		// Initialize WebView2 asynchronously
@@ -576,140 +575,29 @@ public partial class MainWindow : TurbolandWindow
 	{
 		try
 		{
-			System.IO.Directory.CreateDirectory(_webViewDataFolder);
-
-			var env = await Microsoft.Web.WebView2.Core.CoreWebView2Environment
-				.CreateAsync(null, _webViewDataFolder);
-			if (_closing) return;
-			await webViewOutput.EnsureCoreWebView2Async(env);
-
-			// ── Lock down the WebView2 so it behaves as a pure display
-			// surface, not a general-purpose browser. Disable navigation
-			// affordances the user could accidentally trigger.
-			// Install the Borland Vision stylesheet and the diagram palette
-			// before any script in output.html runs, so the first frame the
-			// user sees is already themed. Registered on the environment, not
-			// the page, so it survives every reload.
-			await webViewOutput.CoreWebView2.AddScriptToExecuteOnDocumentCreatedAsync(
-				BorlandVisionTheme.BuildBootstrapScript());
-
-			var settings = webViewOutput.CoreWebView2.Settings;
-			settings.AreDefaultContextMenusEnabled = false;
-			settings.AreBrowserAcceleratorKeysEnabled = false;
-			settings.IsStatusBarEnabled = false;
-			settings.AreDevToolsEnabled = false;
-
-			// The Rendered tab posts JSON messages (e.g. file-path link
-			// clicks) back to us via window.chrome.webview.postMessage.
-			// Wire the receiver before navigation so no early message is
-			// dropped on the floor.
-			webViewOutput.CoreWebView2.WebMessageReceived += WebView_WebMessageReceived;
-
-			// Intercept top-level navigations (clicked anchors, document.location
-			// assignments) and popup window requests (target="_blank", window.open).
-			// Any web URL is routed to the system default browser so the
-			// Rendered tab never replaces the transcript with a remote page.
-			webViewOutput.CoreWebView2.NavigationStarting += WebView_NavigationStarting;
-			webViewOutput.CoreWebView2.FrameNavigationStarting += WebView_FrameNavigationStarting;
-			webViewOutput.CoreWebView2.NewWindowRequested += WebView_NewWindowRequested;
-			webViewOutput.CoreWebView2.NavigationCompleted += WebView_NavigationCompleted;
-
-			// Navigate to the bundled output.html
-			var htmlPath = System.IO.Path.Combine(AppContext.BaseDirectory, "web", "output.html");
-			if (System.IO.File.Exists(htmlPath))
-			{
-				_outputHtmlUri = new Uri(htmlPath).AbsoluteUri;
-				webViewOutput.CoreWebView2.Navigate(_outputHtmlUri);
-				// _webViewReady is set in NavigationCompleted, once
-				// output.js is actually loaded and its functions exist.
-			}
-			else
-			{
-				throw new System.IO.FileNotFoundException("The rendered output page is missing.", htmlPath);
-			}
+			await _renderedWebView.InitializeAsync();
 		}
 		catch (Exception ex)
 		{
-			if (!_closing)
-			{
-				AppendOutput($"\r\n[error] Rendered output is unavailable: {ex.Message}\r\n");
-				outputTabs.SelectedIndex = 1;
-			}
+			RenderedWebView_Failed($"Rendered output is unavailable: {ex.Message}");
 		}
 	}
 
-	// ── WebView2 event handlers ──────────────────────────────────────────────
-
-	/// <summary>
-	/// Handles JSON messages posted by the web renderer for links,
-	/// change actions, and code-block copy controls. Unknown message
-	/// shapes are ignored so the renderer can introduce new message
-	/// types without crashing older builds.
-	/// </summary>
-	private void WebView_WebMessageReceived(
-		object? sender,
-		Microsoft.Web.WebView2.Core.CoreWebView2WebMessageReceivedEventArgs e)
+	private void RenderedWebView_Ready()
 	{
-		string json;
-		try
-		{
-			json = e.TryGetWebMessageAsString();
-		}
-		catch
-		{
-			// Non-string payloads are ignored.
+		if (_closing)
 			return;
-		}
-		if (string.IsNullOrWhiteSpace(json)) return;
-
-		// Parse and handle known message types
-		try
-		{
-			using var doc = JsonDocument.Parse(json);
-			var root = doc.RootElement;
-
-			if (!root.TryGetProperty("type", out var typeEl))
-				return;
-			var type = typeEl.GetString();
-			if (type == "copyCode"
-				&& root.TryGetProperty("id", out var idEl)
-				&& root.TryGetProperty("text", out var textEl))
-			{
-				var id = idEl.GetString();
-				var text = textEl.GetString();
-				if (!string.IsNullOrEmpty(id) && text is not null)
-					CopyRenderedCode(id, text);
-				return;
-			}
-
-			if (root.TryGetProperty("path", out var pathEl))
-			{
-				var path = pathEl.GetString();
-				if (string.IsNullOrEmpty(type) || string.IsNullOrEmpty(path)) return;
-
-				HandleWebMessage(type, path);
-			}
-		}
-		catch
-		{
-			// Malformed JSON — ignore silently
-		}
+		_webViewReady = true;
+		SyncRenderedTranscript();
 	}
 
-	private void CopyRenderedCode(string id, string text)
+	private void RenderedWebView_Failed(string message)
 	{
-		var succeeded = true;
-		try
-		{
-			Clipboard.SetText(text);
-		}
-		catch (Exception ex) when (ex is System.Runtime.InteropServices.ExternalException
-			or ThreadStateException)
-		{
-			succeeded = false;
-		}
-
-		PushToRenderer($"setCodeCopyResult({JsString(id)}, {(succeeded ? "true" : "false")})");
+		if (_closing)
+			return;
+		_webViewReady = false;
+		AppendOutput($"\r\n[error] {message}\r\n");
+		outputTabs.SelectedIndex = 1;
 	}
 
 	/// <summary>
@@ -723,10 +611,6 @@ public partial class MainWindow : TurbolandWindow
 			// Message names match the renderer's postPathMessage() calls.
 			case "openPath":
 				OpenFileInEditor(path);
-				break;
-
-			case "openUri":
-				LaunchInDefaultBrowser(path);
 				break;
 
 			case "action":
@@ -771,95 +655,6 @@ public partial class MainWindow : TurbolandWindow
 				$"Could not open this file:\r\n{path}\r\n\r\n{ex.Message}",
 				"Open File");
 		}
-	}
-
-	/// <summary>
-	/// Blocks all navigations except our output.html and about: URLs.
-	/// Web URLs are launched in the system default browser.
-	/// </summary>
-	private void WebView_NavigationStarting(
-		object? sender,
-		Microsoft.Web.WebView2.Core.CoreWebView2NavigationStartingEventArgs e)
-	{
-		if (string.IsNullOrEmpty(e.Uri)) return;
-
-		// Allow only our exact output.html file URI
-		if (_outputHtmlUri != null
-			&& e.Uri.Equals(_outputHtmlUri, StringComparison.OrdinalIgnoreCase))
-		{
-			return;
-		}
-
-		if (e.Uri.StartsWith("about:", StringComparison.OrdinalIgnoreCase)) return;
-
-		e.Cancel = true;
-		LaunchInDefaultBrowser(e.Uri);
-	}
-
-	/// <summary>
-	/// Blocks all iframe/frame navigations. The Rendered tab should
-	/// never load external content inside embedded frames.
-	/// </summary>
-	private void WebView_FrameNavigationStarting(
-		object? sender,
-		Microsoft.Web.WebView2.Core.CoreWebView2NavigationStartingEventArgs e)
-	{
-		if (string.IsNullOrEmpty(e.Uri)) return;
-
-		// Allow about:blank (used by some internal frame init)
-		if (e.Uri.StartsWith("about:", StringComparison.OrdinalIgnoreCase)) return;
-
-		e.Cancel = true;
-	}
-
-	/// <summary>
-	/// Marks the renderer live once output.html has loaded and replays the
-	/// transcript buffer so the Rendered tab matches the Raw tab. If a
-	/// navigation completes on an unexpected page, re-navigates to
-	/// output.html (the sync below then runs again on the next completion).
-	/// </summary>
-	private void WebView_NavigationCompleted(
-		object? sender,
-		Microsoft.Web.WebView2.Core.CoreWebView2NavigationCompletedEventArgs e)
-	{
-		if (_outputHtmlUri == null || _closing) return;
-		if (!e.IsSuccess)
-		{
-			if (e.WebErrorStatus == Microsoft.Web.WebView2.Core.CoreWebView2WebErrorStatus.OperationCanceled)
-				return;
-			_webViewReady = false;
-			AppendOutput($"\r\n[error] Rendered output failed to load: {e.WebErrorStatus}\r\n");
-			outputTabs.SelectedIndex = 1;
-			return;
-		}
-
-		var currentUri = webViewOutput.CoreWebView2.Source;
-		if (currentUri != null
-			&& currentUri.Equals(_outputHtmlUri, StringComparison.OrdinalIgnoreCase))
-		{
-			// output.js is loaded and its functions exist from here on.
-			_webViewReady = true;
-			SyncRenderedTranscript();
-			return;
-		}
-
-		// We are on an unexpected page -- recover by re-navigating
-		_webViewReady = false;
-		webViewOutput.CoreWebView2.Navigate(_outputHtmlUri);
-	}
-
-	/// <summary>
-	/// Handles target="_blank" anchors and window.open calls.
-	/// Always sets Handled = true so the WebView2 runtime does
-	/// not spawn a new popup window, then routes web URLs through
-	/// the system default browser.
-	/// </summary>
-	private void WebView_NewWindowRequested(
-		object? sender,
-		Microsoft.Web.WebView2.Core.CoreWebView2NewWindowRequestedEventArgs e)
-	{
-		e.Handled = true;
-		LaunchInDefaultBrowser(e.Uri);
 	}
 
 	/// <summary>
@@ -1052,27 +847,6 @@ public partial class MainWindow : TurbolandWindow
 		outputPageGutter.ToolTip = first == last
 			? $"Output page {first} of {_outputPages.Count}"
 			: $"Output pages {first}-{last} of {_outputPages.Count}";
-	}
-
-	/// <summary>
-	/// The help document shown at startup and on demand from the Help menu.
-	/// It ships as markdown text rather than markup because the Raw tab has
-	/// to show exactly what the Rendered tab renders. Line endings are
-	/// normalized to CRLF so the buffer, the Raw tab and the file agree.
-	/// </summary>
-	private static string LoadHelpDocument()
-	{
-		var path = System.IO.Path.Combine(AppContext.BaseDirectory, "Assets", "ShowHelp.md");
-		try
-		{
-			var text = System.IO.File.ReadAllText(path);
-			return text.Replace("\r\n", "\n").Replace("\n", "\r\n");
-		}
-		catch
-		{
-			// Missing or unreadable help document is not worth a dialog.
-			return "TurboPilot\r\n";
-		}
 	}
 
 	/// <summary>
@@ -1374,18 +1148,43 @@ public partial class MainWindow : TurbolandWindow
 	/// </summary>
 	private static string JsString(string text) => JsonSerializer.Serialize(text);
 
-	/// <summary>
-	/// Help menu: appends the help document to the output without clearing
-	/// it, so it can be read over an active session's transcript. A blank
-	/// line separates it from whatever came before.
-	/// </summary>
+	/// <summary>Shows or activates the modeless rendered Help window.</summary>
 	private void OnShowHelp(object sender, RoutedEventArgs e)
 	{
-		var help = LoadHelpDocument();
-		if (_outputText.Length > 0)
-			help = "\r\n" + help;
+		if (_helpWindow is { IsLoaded: true } existing)
+		{
+			if (existing.WindowState == WindowState.Minimized)
+				existing.WindowState = WindowState.Normal;
+			existing.Activate();
+			return;
+		}
 
-		AppendOutput(help);
+		string help;
+		try
+		{
+			help = HelpContent.Load();
+		}
+		catch (Exception ex) when (ex is IOException
+			or UnauthorizedAccessException
+			or System.Security.SecurityException)
+		{
+			MessageDialog.Ok(this,
+				$"Help could not be loaded.\r\n\r\n{ex.Message}",
+				"Help");
+			return;
+		}
+
+		var helpWindow = new HelpWindow(help, _webViewDataFolder, _launchExternal)
+		{
+			Owner = this,
+		};
+		_helpWindow = helpWindow;
+		helpWindow.Closed += (_, _) =>
+		{
+			if (ReferenceEquals(_helpWindow, helpWindow))
+				_helpWindow = null;
+		};
+		helpWindow.Show();
 	}
 
 	private void OnAbout(object sender, RoutedEventArgs e)
@@ -3117,7 +2916,7 @@ public partial class MainWindow : TurbolandWindow
 		_attachments.Clear();
 		PruneImagePreviews();
 		_renderedUpdateTimer.Stop();
-		webViewOutput.Dispose();
+		_renderedWebView.Dispose();
 		base.OnClosed(e);
 	}
 }

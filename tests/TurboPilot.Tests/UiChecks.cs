@@ -368,6 +368,95 @@ internal static class UiChecks
 		Console.WriteLine("PASS Rendered code blocks copy their complete text and exports omit the live control");
 	}
 
+	private static async Task CheckHelpWindowAsync(
+		Application application,
+		MainWindow window,
+		List<System.Diagnostics.ProcessStartInfo> externalStarts)
+	{
+		window.ClearOutput();
+		window.AppendOutput("SESSION_OUTPUT_SENTINEL");
+		var transcript = window.OutputText;
+
+		Control<MenuItem>(window, "menuShowHelp").RaiseEvent(new RoutedEventArgs(MenuItem.ClickEvent));
+		await Check.UntilAsync(
+			() => application.Windows.OfType<HelpWindow>().Any(),
+			"Show Help did not open its own window.");
+		var help = application.Windows.OfType<HelpWindow>().Single();
+		Check.True(ReferenceEquals(window, help.Owner) && help.IsVisible,
+			"Help must be an owned top-level window.");
+		Check.True(window.IsEnabled,
+			"Modeless Help must leave the main window available.");
+		Check.Equal(transcript, window.OutputText,
+			"Opening Help must not append anything to session output.");
+
+		await Check.UntilAsync(
+			() => help.IsRendererReady,
+			"The Help renderer did not initialize.");
+		var helpView = Control<WebView2>(help, "webViewHelp");
+		var rendered = false;
+		for (var attempt = 0; attempt < 100 && !rendered; attempt++)
+		{
+			using var result = JsonDocument.Parse(await helpView.CoreWebView2.ExecuteScriptAsync(
+				"({"
+				+ " title: document.getElementById('output').textContent.includes('TurboPilot Help'),"
+				+ " quick: document.getElementById('output').textContent.includes('Quick start'),"
+				+ " command: document.getElementById('output').textContent.includes('/terminal'),"
+				+ " copy: document.querySelectorAll('#output .kp-code-copy').length"
+				+ "})"));
+			rendered = result.RootElement.GetProperty("title").GetBoolean()
+				&& result.RootElement.GetProperty("quick").GetBoolean()
+				&& result.RootElement.GetProperty("command").GetBoolean()
+				&& result.RootElement.GetProperty("copy").GetInt32() > 0;
+			if (!rendered)
+				await Task.Delay(50);
+		}
+		Check.True(rendered,
+			"Help must use the complete Rendered output stack, including its live command table and code controls.");
+
+		var outputTabs = Control<TabControl>(window, "outputTabs");
+		outputTabs.SelectedIndex = 1;
+		await window.Dispatcher.InvokeAsync(() => { }, DispatcherPriority.ApplicationIdle);
+		Check.True(help.IsVisible && outputTabs.SelectedIndex == 1,
+			"Help must remain open while the main window is used.");
+		outputTabs.SelectedIndex = 0;
+
+		Control<MenuItem>(window, "menuShowHelp").RaiseEvent(new RoutedEventArgs(MenuItem.ClickEvent));
+		Check.True(application.Windows.OfType<HelpWindow>().Count() == 1
+			&& ReferenceEquals(help, application.Windows.OfType<HelpWindow>().Single()),
+			"Repeated Show Help commands must activate the existing window.");
+
+		using (DialogAction<AboutDialog>(application,
+			dialog => Invoke(dialog, "OnOk", dialog, new RoutedEventArgs())))
+		{
+			Invoke(window, "OnAbout", window, new RoutedEventArgs());
+		}
+		Check.True(help.IsVisible,
+			"Help must remain open after navigating another application dialog.");
+
+		var source = helpView.Source;
+		var startsBefore = externalStarts.Count;
+		await helpView.CoreWebView2.ExecuteScriptAsync(
+			"Array.from(document.querySelectorAll('#output a'))"
+			+ ".find(a => a.href.includes('github.com/mighty-studios/TurboPilot')).click()");
+		await Check.UntilAsync(
+			() => externalStarts.Count == startsBefore + 1,
+			"The Help link was not handed to the system browser.");
+		Check.Equal("https://github.com/mighty-studios/TurboPilot", externalStarts[^1].FileName,
+			"Open the TurboPilot Help link externally");
+		Check.Equal(source, helpView.Source,
+			"Keep the rendered Help document loaded after a web link click.");
+		Check.Equal(transcript, window.OutputText,
+			"Using Help must leave session output unchanged.");
+
+		help.Close();
+		await Check.UntilAsync(
+			() => !application.Windows.OfType<HelpWindow>().Any(),
+			"The Help window did not close.");
+		externalStarts.Clear();
+		window.ClearOutput();
+		Console.WriteLine("PASS modeless rendered Help stays separate from session output");
+	}
+
 	private static async Task CheckOutputPageWindowAsync(MainWindow window, WebView2 webView)
 	{
 		IReadOnlyList<OutputPageContent> pages = Enumerable.Range(1, 6)
@@ -588,6 +677,7 @@ internal static class UiChecks
 			await window.Dispatcher.InvokeAsync(() => { }, DispatcherPriority.Loaded);
 			outputTabs.SelectedIndex = 0;
 			await window.Dispatcher.InvokeAsync(() => { }, DispatcherPriority.Loaded);
+			await CheckHelpWindowAsync(application, window, externalStarts);
 			await CheckStatusMarqueeAsync(window);
 			await CheckCodeBlockCopyAsync(window, webView);
 			await CheckOutputPageWindowAsync(window, webView);
