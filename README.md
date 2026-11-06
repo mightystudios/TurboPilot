@@ -71,6 +71,8 @@ Load prompts, custom agents, skills, instructions, and MCP servers from standard
 
 - Windows 11
 - [.NET 10 SDK](https://dotnet.microsoft.com/download/dotnet/10.0)
+- Visual Studio 2026 18.0 or later with the **.NET desktop development**
+  workload when building in Visual Studio
 - Microsoft Edge WebView2 Runtime
 - One model service:
   - An authenticated GitHub Copilot CLI profile
@@ -78,6 +80,10 @@ Load prompts, custom agents, skills, instructions, and MCP servers from standard
 - Python 3.10 or later only for the bundled phase-planning workflow
 
 ### Build and run
+
+Visual Studio uses the repository's `.vsconfig` to detect and offer missing
+desktop development components. Visual Studio 2022 cannot target .NET 10; use
+Visual Studio 2026 or the `dotnet` CLI.
 
 ```powershell
 git clone --recurse-submodules https://github.com/mighty-studios/TurboPilot.git

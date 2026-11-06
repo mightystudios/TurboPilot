@@ -8,6 +8,8 @@ provenance.
 ## Prerequisites
 
 - The release commit is on the default branch.
+- Local IDE builds use Visual Studio 2026 18.0 or later with the .NET desktop
+  development workload. `.vsconfig` declares the required components.
 - Its TurbolandWPF submodule commit is available from
   `https://github.com/mighty-studios/TurbolandWPF.git`.
 - The tag uses SemVer with a leading `v`, such as `v1.0.0-alpha.2`.
