@@ -50,9 +50,10 @@ public partial class MainWindow : TurbolandWindow
 	private readonly StringBuilder _outputText = new();
 	private readonly StringBuilder _renderedText = new();
 	private readonly System.Windows.Documents.Run _rawOutputRun = new();
+	private const int OutputPageWindowSize = 4;
 	private readonly List<OutputPageView> _outputPages = [new("local-page-0")];
 	private string _activeOutputPageId = "local-page-0";
-	private int _selectedOutputPage;
+	private int _outputPageWindowStart;
 	private int _localOutputPageSequence;
 
 	private sealed class OutputPageView(string id)
@@ -907,12 +908,34 @@ public partial class MainWindow : TurbolandWindow
 	// from prepared Rendered content.
 
 	/// <summary>
-	/// The complete verbatim transcript. The Raw tab materializes only
-	/// the output page selected in the shared page gutter.
+	/// The complete verbatim transcript. The Raw tab materializes the
+	/// four-page window selected in the shared page gutter.
 	/// </summary>
 	public string OutputText => _outputText.ToString();
 	public string RenderedText => _renderedText.ToString();
-	private OutputPageView SelectedOutputPage => _outputPages[_selectedOutputPage];
+	private int OutputPageWindowEnd =>
+		Math.Min(_outputPageWindowStart + OutputPageWindowSize, _outputPages.Count);
+	private int NewestOutputPageWindowStart =>
+		Math.Max(0, _outputPages.Count - OutputPageWindowSize);
+	private bool IsNewestOutputPageWindow =>
+		_outputPageWindowStart == NewestOutputPageWindowStart;
+
+	private bool IsOutputPageVisible(OutputPageView page)
+	{
+		var index = _outputPages.IndexOf(page);
+		return index >= _outputPageWindowStart && index < OutputPageWindowEnd;
+	}
+
+	private bool IsLastVisibleOutputPage(OutputPageView page) =>
+		ReferenceEquals(page, _outputPages[OutputPageWindowEnd - 1]);
+
+	private string OutputPageWindowText(Func<OutputPageView, StringBuilder> content)
+	{
+		var text = new StringBuilder();
+		for (var index = _outputPageWindowStart; index < OutputPageWindowEnd; index++)
+			text.Append(content(_outputPages[index]));
+		return text.ToString();
+	}
 
 	private OutputPageView EnsureOutputPage(string pageId)
 	{
@@ -932,14 +955,14 @@ public partial class MainWindow : TurbolandWindow
 			return _outputPages[0];
 		}
 
-		var followNewest = _selectedOutputPage == _outputPages.Count - 1;
+		var followNewest = IsNewestOutputPageWindow;
 		var page = new OutputPageView(pageId);
 		_outputPages.Add(page);
 		_activeOutputPageId = pageId;
 		if (followNewest)
 		{
-			_selectedOutputPage = _outputPages.Count - 1;
-			MaterializeSelectedOutputPage(TranscriptPosition.End);
+			_outputPageWindowStart = NewestOutputPageWindowStart;
+			MaterializeOutputPageWindow(TranscriptPosition.End);
 		}
 		UpdateOutputPageButtons();
 		return page;
@@ -978,11 +1001,11 @@ public partial class MainWindow : TurbolandWindow
 		{
 			_activeOutputPageId = _outputPages[^1].Id;
 		}
-		_selectedOutputPage = selectNewest ? _outputPages.Count - 1 : 0;
+		_outputPageWindowStart = selectNewest ? NewestOutputPageWindowStart : 0;
 		_pendingRenderedAppend.Clear();
 		_pendingRendererCommands.Clear();
 		_renderedFullSyncPending = true;
-		MaterializeSelectedOutputPage(selectNewest ? TranscriptPosition.End : TranscriptPosition.Top);
+		MaterializeOutputPageWindow(selectNewest ? TranscriptPosition.End : TranscriptPosition.Top);
 	}
 
 	private List<OutputPageContent> CaptureOutputPages() =>
@@ -991,12 +1014,12 @@ public partial class MainWindow : TurbolandWindow
 			page.Raw.ToString(),
 			page.Rendered.ToString())).ToList();
 
-	private void MaterializeSelectedOutputPage(TranscriptPosition position)
+	private void MaterializeOutputPageWindow(TranscriptPosition position)
 	{
 		_pendingRenderedAppend.Clear();
 		_pendingRendererCommands.Clear();
 		_renderedFullSyncPending = true;
-		_rawOutputRun.Text = SelectedOutputPage.Raw.ToString();
+		_rawOutputRun.Text = OutputPageWindowText(page => page.Raw);
 		_renderedTranscriptPosition = position;
 		_rawTranscriptPosition = position;
 		QueueRenderedFullSync();
@@ -1004,27 +1027,31 @@ public partial class MainWindow : TurbolandWindow
 		UpdateOutputPageButtons();
 	}
 
-	private void SelectOutputPage(int index)
+	private void SelectOutputPageWindow(int index)
 	{
-		if (index < 0 || index >= _outputPages.Count || index == _selectedOutputPage)
+		if (index < 0 || index > NewestOutputPageWindowStart || index == _outputPageWindowStart)
 			return;
-		_selectedOutputPage = index;
-		MaterializeSelectedOutputPage(
-			index == _outputPages.Count - 1 ? TranscriptPosition.End : TranscriptPosition.Top);
+		_outputPageWindowStart = index;
+		MaterializeOutputPageWindow(
+			IsNewestOutputPageWindow ? TranscriptPosition.End : TranscriptPosition.Top);
 	}
 
 	private void ButtonOutputPagePrev_Click(object sender, RoutedEventArgs e) =>
-		SelectOutputPage(_selectedOutputPage - 1);
+		SelectOutputPageWindow(_outputPageWindowStart - 1);
 
 	private void ButtonOutputPageNext_Click(object sender, RoutedEventArgs e) =>
-		SelectOutputPage(_selectedOutputPage + 1);
+		SelectOutputPageWindow(_outputPageWindowStart + 1);
 
 	private void UpdateOutputPageButtons()
 	{
-		var enabled = !_closing && _outputPages.Count > 1;
-		buttonOutputPagePrev.IsEnabled = enabled && _selectedOutputPage > 0;
-		buttonOutputPageNext.IsEnabled = enabled && _selectedOutputPage < _outputPages.Count - 1;
-		outputPageGutter.ToolTip = $"Output page {_selectedOutputPage + 1} of {_outputPages.Count}";
+		var enabled = !_closing && _outputPages.Count > OutputPageWindowSize;
+		buttonOutputPagePrev.IsEnabled = enabled && _outputPageWindowStart > 0;
+		buttonOutputPageNext.IsEnabled = enabled && _outputPageWindowStart < NewestOutputPageWindowStart;
+		var first = _outputPageWindowStart + 1;
+		var last = OutputPageWindowEnd;
+		outputPageGutter.ToolTip = first == last
+			? $"Output page {first} of {_outputPages.Count}"
+			: $"Output pages {first}-{last} of {_outputPages.Count}";
 	}
 
 	/// <summary>
@@ -1076,12 +1103,20 @@ public partial class MainWindow : TurbolandWindow
 		_outputText.Append(text);
 		var page = EnsureOutputPage(pageId);
 		page.Raw.Append(text);
-		if (!ReferenceEquals(page, SelectedOutputPage))
+		if (!IsOutputPageVisible(page))
 			return;
+		if (!IsLastVisibleOutputPage(page))
+		{
+			_rawOutputRun.Text = OutputPageWindowText(outputPage => outputPage.Raw);
+			return;
+		}
 		// Range-based appends normalize paragraph boundaries between chunks.
 		_rawOutputRun.ContentEnd.InsertTextInRun(text);
-		richTextBoxOutput.CaretPosition = _rawOutputRun.ContentEnd;
-		richTextBoxOutput.ScrollToEnd();
+		if (IsNewestOutputPageWindow)
+		{
+			richTextBoxOutput.CaretPosition = _rawOutputRun.ContentEnd;
+			richTextBoxOutput.ScrollToEnd();
+		}
 	}
 
 	private void AppendRenderedOutput(string text)
@@ -1094,8 +1129,13 @@ public partial class MainWindow : TurbolandWindow
 		_renderedText.Append(text);
 		var page = EnsureOutputPage(pageId);
 		page.Rendered.Append(text);
-		if (!ReferenceEquals(page, SelectedOutputPage))
+		if (!IsOutputPageVisible(page))
 			return;
+		if (!IsLastVisibleOutputPage(page))
+		{
+			QueueRenderedFullSync();
+			return;
+		}
 		if (_renderedFullSyncPending || !_webViewReady)
 		{
 			_pendingRenderedAppend.Clear();
@@ -1108,13 +1148,6 @@ public partial class MainWindow : TurbolandWindow
 		ScheduleRenderedUpdate();
 	}
 
-	private void ReplaceRenderedOutput(string text)
-	{
-		_renderedText.Clear().Append(text);
-		SelectedOutputPage.Rendered.Clear().Append(text);
-		QueueRenderedFullSync();
-	}
-
 	private void ReplaceRenderedPage(string pageId, string text)
 	{
 		var page = EnsureOutputPage(pageId);
@@ -1122,7 +1155,7 @@ public partial class MainWindow : TurbolandWindow
 		_renderedText.Clear();
 		foreach (var outputPage in _outputPages)
 			_renderedText.Append(outputPage.Rendered);
-		if (ReferenceEquals(page, SelectedOutputPage))
+		if (IsOutputPageVisible(page))
 			QueueRenderedFullSync();
 	}
 
@@ -1143,7 +1176,7 @@ public partial class MainWindow : TurbolandWindow
 		_outputPages.Clear();
 		_activeOutputPageId = $"local-page-{++_localOutputPageSequence}";
 		_outputPages.Add(new OutputPageView(_activeOutputPageId));
-		_selectedOutputPage = 0;
+		_outputPageWindowStart = 0;
 		_rawOutputRun.Text = "";
 		QueueRenderedFullSync();
 		UpdateOutputPageButtons();
@@ -1258,7 +1291,7 @@ public partial class MainWindow : TurbolandWindow
 			_renderedFullSyncPending = false;
 			_pendingRenderedAppend.Clear();
 			script.Append("setTranscript(")
-				.Append(JsString(SelectedOutputPage.Rendered.ToString()))
+				.Append(JsString(OutputPageWindowText(page => page.Rendered)))
 				.Append(");");
 		}
 		else if (_pendingRenderedAppend.Length > 0)
@@ -3014,8 +3047,8 @@ public partial class MainWindow : TurbolandWindow
 			if (_webViewReady)
 			{
 				await webViewOutput.CoreWebView2.ExecuteScriptAsync(
-					$"setTranscript({JsString(SelectedOutputPage.Rendered.ToString())});"
-					+ (_selectedOutputPage == _outputPages.Count - 1 ? "scrollToEnd();" : "scrollToTop();"));
+					$"setTranscript({JsString(OutputPageWindowText(page => page.Rendered))});"
+					+ (IsNewestOutputPageWindow ? "scrollToEnd();" : "scrollToTop();"));
 			}
 		}
 

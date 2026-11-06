@@ -368,6 +368,79 @@ internal static class UiChecks
 		Console.WriteLine("PASS Rendered code blocks copy their complete text and exports omit the live control");
 	}
 
+	private static async Task CheckOutputPageWindowAsync(MainWindow window, WebView2 webView)
+	{
+		IReadOnlyList<OutputPageContent> pages = Enumerable.Range(1, 6)
+			.Select(index => new OutputPageContent(
+				$"page-{index}",
+				$"RAW_PAGE_{index}\r\n",
+				$"RENDERED_PAGE_{index}\r\n\r\n"))
+			.ToArray();
+		var raw = Control<RichTextBox>(window, "richTextBoxOutput");
+		var previous = Control<Button>(window, "buttonOutputPagePrev");
+		var next = Control<Button>(window, "buttonOutputPageNext");
+		var gutter = Control<Border>(window, "outputPageGutter");
+
+		async Task CheckWindowAsync(int first, int last, string message)
+		{
+			await InvokeTask(window, "FlushRenderedOutputNowAsync");
+			var rawText = new TextRange(raw.Document.ContentStart, raw.Document.ContentEnd).Text;
+			var renderedJson = await webView.CoreWebView2.ExecuteScriptAsync(
+				"document.getElementById('output').textContent");
+			var renderedText = JsonSerializer.Deserialize<string>(renderedJson) ?? "";
+			for (var page = 1; page <= 8; page++)
+			{
+				var expected = page >= first && page <= last;
+				Check.True(rawText.Contains($"RAW_PAGE_{page}", StringComparison.Ordinal) == expected,
+					$"{message}: Raw page {page} visibility must be {expected}.");
+				Check.True(renderedText.Contains($"RENDERED_PAGE_{page}", StringComparison.Ordinal) == expected,
+					$"{message}: Rendered page {page} visibility must be {expected}.");
+			}
+		}
+
+		Invoke(window, "LoadOutputPages", pages, false);
+		await CheckWindowAsync(1, 4, "The initial output window");
+		Check.True(!previous.IsEnabled && next.IsEnabled,
+			"The first output window must offer only a newer shift.");
+		Check.Equal("Output pages 1-4 of 6", gutter.ToolTip?.ToString(),
+			"Describe the complete initial output window");
+
+		Click(window, "buttonOutputPageNext");
+		await CheckWindowAsync(2, 5, "A one-page newer shift");
+		Check.True(previous.IsEnabled && next.IsEnabled,
+			"A middle output window must offer both directions.");
+		Check.Equal("Output pages 2-5 of 6", gutter.ToolTip?.ToString(),
+			"Describe the shifted output window");
+
+		Click(window, "buttonOutputPageNext");
+		await CheckWindowAsync(3, 6, "The newest output window");
+		Check.True(previous.IsEnabled && !next.IsEnabled,
+			"The newest output window must offer only an older shift.");
+
+		Invoke(window, "LoadOutputPages", pages, true);
+		Invoke(window, "BeginOutputPage", "page-7");
+		Invoke(window, "AppendRawPage", "page-7", "RAW_PAGE_7\r\n");
+		Invoke(window, "AppendRenderedPage", "page-7", "RENDERED_PAGE_7\r\n\r\n");
+		await CheckWindowAsync(4, 7, "A live window following a new page");
+
+		Click(window, "buttonOutputPagePrev");
+		Invoke(window, "BeginOutputPage", "page-8");
+		Invoke(window, "AppendRawPage", "page-8", "RAW_PAGE_8\r\n");
+		Invoke(window, "AppendRenderedPage", "page-8", "RENDERED_PAGE_8\r\n\r\n");
+		await CheckWindowAsync(3, 6, "An older window while a new page arrives");
+		Check.True(next.IsEnabled,
+			"New output must remain reachable without moving a window browsing older pages.");
+
+		Click(window, "buttonOutputPageNext");
+		await CheckWindowAsync(4, 7, "The first newer shift after held output");
+		Click(window, "buttonOutputPageNext");
+		await CheckWindowAsync(5, 8, "The second newer shift after held output");
+
+		window.ClearOutput();
+		await InvokeTask(window, "FlushRenderedOutputNowAsync");
+		Console.WriteLine("PASS Raw and Rendered output share a four-page sliding window");
+	}
+
 	private static async Task CheckRenderedUserPromptStyleAsync(MainWindow window, WebView2 webView)
 	{
 		window.ClearOutput();
@@ -517,6 +590,7 @@ internal static class UiChecks
 			await window.Dispatcher.InvokeAsync(() => { }, DispatcherPriority.Loaded);
 			await CheckStatusMarqueeAsync(window);
 			await CheckCodeBlockCopyAsync(window, webView);
+			await CheckOutputPageWindowAsync(window, webView);
 			await CheckPromptLayoutAsync(window);
 			await CheckRenderedUserPromptStyleAsync(window, webView);
 			await CheckRenderedResizeUnderStreamingAsync(window, webView);
@@ -558,19 +632,11 @@ internal static class UiChecks
 			var raw = Control<RichTextBox>(window, "richTextBoxOutput");
 			var rawText = new TextRange(raw.Document.ContentStart, raw.Document.ContentEnd).Text;
 			Check.True(rawText.Contains("UI prompt marker") && rawText.Contains("UI streaming reply")
-				&& !rawText.Contains("Commands:"),
-				"The Raw tab must materialize only the current request page.");
-			Check.True(Control<Button>(window, "buttonOutputPagePrev").IsEnabled
+				&& rawText.Contains("Commands:"),
+				"The Raw tab must materialize every page in a short session.");
+			Check.True(!Control<Button>(window, "buttonOutputPagePrev").IsEnabled
 				&& !Control<Button>(window, "buttonOutputPageNext").IsEnabled,
-				"The output gutter must offer the older page from the newest page.");
-			Click(window, "buttonOutputPagePrev");
-			rawText = new TextRange(raw.Document.ContentStart, raw.Document.ContentEnd).Text;
-			Check.True(rawText.Contains("Commands:") && !rawText.Contains("UI streaming reply"),
-				"The older output page must contain the session preamble without the request reply.");
-			Click(window, "buttonOutputPageNext");
-			rawText = new TextRange(raw.Document.ContentStart, raw.Document.ContentEnd).Text;
-			Check.True(rawText.Contains("UI streaming reply"),
-				"Returning to the newest output page must restore the request reply.");
+				"The output gutter must stay idle while all pages fit in one window.");
 			Check.Equal("", Input(window), "Clear accepted input");
 			Check.True(MainWindow.IsSendShortcut(Key.Enter, ModifierKeys.Control)
 				&& MainWindow.IsSendShortcut(Key.Return, ModifierKeys.Control), "Ctrl+Enter must send.");
@@ -641,6 +707,18 @@ internal static class UiChecks
 			Check.Equal(0, cues.Count, "Turning cues off must silence them");
 			Sounds.Played = null;
 			Console.WriteLine("PASS WPF chat questions, numbered answers without pop-up dialogs, and audio cues");
+
+			for (var page = 1; page <= 2; page++)
+			{
+				var pagingReply = $"Saved paging reply {page}.";
+				provider.Replies.Enqueue(new LocalProvider.Reply(pagingReply));
+				SetInput(window, $"saved paging prompt {page}");
+				Click(window, "buttonSend");
+				await Check.UntilAsync(
+					() => Status(window).StartsWith("Ready..")
+						&& window.OutputText.Contains(pagingReply, StringComparison.Ordinal),
+					$"Saved paging turn {page} did not complete.");
+			}
 
 			var attachments = Field<List<string>>(window, "_attachments");
 			attachments.Add(Path.Combine(workspace.Workspace, "missing.txt"));

@@ -169,12 +169,12 @@
                         <Button x:Name="buttonOutputPagePrev" Grid.Row="0"
                                 Style="{StaticResource HistoryArrowButton}"
                                 Content="&#x25B2;"
-                                ToolTip="Older output page"
+                                ToolTip="Slide output window one page older"
                                 Click="ButtonOutputPagePrev_Click"/>
                         <Button x:Name="buttonOutputPageNext" Grid.Row="2"
                                 Style="{StaticResource HistoryArrowButton}"
                                 Content="&#x25BC;"
-                                ToolTip="Newer output page"
+                                ToolTip="Slide output window one page newer"
                                 Click="ButtonOutputPageNext_Click"/>
                     </Grid>
                 </Border>
