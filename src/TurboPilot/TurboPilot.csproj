@@ -2,7 +2,7 @@
 
 	<PropertyGroup>
 		<OutputType>WinExe</OutputType>
-		<TargetFramework>net9.0-windows7.0</TargetFramework>
+		<TargetFramework>net10.0-windows7.0</TargetFramework>
 		<Nullable>enable</Nullable>
 		<ImplicitUsings>enable</ImplicitUsings>
 		<UseWPF>true</UseWPF>
@@ -10,6 +10,10 @@
 		<RootNamespace>TurboPilot</RootNamespace>
 		<ApplicationManifest>app.manifest</ApplicationManifest>
 		<Version>1.0.0-alpha.1</Version>
+		<!-- WPF owns process DPI awareness through app.manifest. WinForms is
+		     enabled only for native picker interop, so its manifest warning
+		     does not describe this application's startup model. -->
+		<NoWarn>$(NoWarn);WFO0003</NoWarn>
 	</PropertyGroup>
 
 	<PropertyGroup>

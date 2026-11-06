@@ -15,7 +15,7 @@
 <p align="center">
   <a href="https://github.com/mighty-studios/TurboPilot/stargazers"><img src="https://img.shields.io/github/stars/mighty-studios/TurboPilot?style=for-the-badge&logo=github&color=yellow" alt="GitHub stars"></a>
   <img src="https://img.shields.io/badge/Platform-Windows%2011-0078D4?style=for-the-badge&logo=windows11" alt="Windows 11">
-  <img src="https://img.shields.io/badge/.NET-9.0-512BD4?style=for-the-badge&logo=dotnet" alt=".NET 9">
+  <img src="https://img.shields.io/badge/.NET-10.0-512BD4?style=for-the-badge&logo=dotnet" alt=".NET 10">
   <a href="./LICENSE.md"><img src="https://img.shields.io/badge/License-Apache%202.0-blue?style=for-the-badge" alt="Apache 2.0 license"></a>
 </p>
 
@@ -70,7 +70,7 @@ Load prompts, custom agents, skills, instructions, and MCP servers from standard
 ### Requirements
 
 - Windows 11
-- [.NET 9 SDK](https://dotnet.microsoft.com/download/dotnet/9.0)
+- [.NET 10 SDK](https://dotnet.microsoft.com/download/dotnet/10.0)
 - Microsoft Edge WebView2 Runtime
 - One model service:
   - An authenticated GitHub Copilot CLI profile
@@ -139,6 +139,9 @@ dotnet run --project .\tests\TurboPilot.Tests -- --runtime --ui
 ```
 
 The optional `--cloud` smoke test uses the authenticated cloud service and may consume credits.
+
+See [RELEASING.md](./RELEASING.md) for the tag-driven, self-contained Windows
+release process and its signing roadmap.
 
 ## Project status
 

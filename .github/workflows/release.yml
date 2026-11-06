@@ -1,0 +1,153 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+  id-token: write
+  attestations: write
+
+env:
+  DOTNET_NOLOGO: true
+  NUGET_XMLDOC_MODE: skip
+
+jobs:
+  release:
+    name: Build Windows release
+    runs-on: windows-2025
+
+    steps:
+      - name: Check out source and theme
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          submodules: recursive
+
+      - name: Install .NET SDK
+        uses: actions/setup-dotnet@v6
+        with:
+          global-json-file: global.json
+
+      - name: Read version from tag
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}"
+          if ($tag -notmatch '^v(?<version>(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-[0-9A-Za-z.-]+)?)$') {
+            throw "Release tag '$tag' must use SemVer, for example v1.0.0-alpha.2."
+          }
+
+          $version = $Matches.version
+          $packageName = "TurboPilot-$version-win-x64"
+          "VERSION=$version" >> $env:GITHUB_ENV
+          "PACKAGE_NAME=$packageName" >> $env:GITHUB_ENV
+          "IS_PRERELEASE=$($version.Contains('-').ToString().ToLowerInvariant())" >> $env:GITHUB_ENV
+
+      - name: Restore
+        run: dotnet restore .\TurboPilot.sln
+
+      - name: Build
+        shell: pwsh
+        run: |
+          dotnet build .\TurboPilot.sln `
+            -c Release `
+            --no-restore `
+            -p:ContinuousIntegrationBuild=true `
+            -p:Version=$env:VERSION
+
+      - name: Run release checks
+        run: >
+          dotnet run
+          --project .\tests\TurboPilot.Tests\TurboPilot.Tests.csproj
+          -c Release
+          --no-build
+          --
+          --runtime
+          --ui
+
+      - name: Publish self-contained application
+        shell: pwsh
+        run: |
+          $publish = Join-Path $PWD "artifacts\publish\win-x64"
+          dotnet publish .\src\TurboPilot\TurboPilot.csproj `
+            -c Release `
+            -r win-x64 `
+            --self-contained true `
+            -p:PublishSingleFile=false `
+            -p:DebugSymbols=false `
+            -p:DebugType=None `
+            -p:ContinuousIntegrationBuild=true `
+            -p:Version=$env:VERSION `
+            -o $publish
+          if ($LASTEXITCODE -ne 0) {
+            throw "dotnet publish failed with exit code $LASTEXITCODE."
+          }
+
+          Copy-Item .\LICENSE.md, .\NOTICE.md, .\licenses.json -Destination $publish
+
+          $required = @(
+            "TurboPilot.exe",
+            "web\output.html",
+            "Assets\ShowHelp.md",
+            "SessionTools\README.md",
+            "session-launch-capabilities.json",
+            "runtimes\win-x64\native\copilot.exe",
+            "LICENSE.md",
+            "NOTICE.md",
+            "licenses.json"
+          )
+          foreach ($relativePath in $required) {
+            if (-not (Test-Path -LiteralPath (Join-Path $publish $relativePath))) {
+              throw "Published release is missing '$relativePath'."
+            }
+          }
+
+      - name: Create archive and checksum
+        id: package
+        shell: pwsh
+        run: |
+          $publish = Join-Path $PWD "artifacts\publish\win-x64"
+          $release = Join-Path $PWD "artifacts\release"
+          New-Item -ItemType Directory -Force -Path $release | Out-Null
+
+          $archive = Join-Path $release "$env:PACKAGE_NAME.zip"
+          Compress-Archive -Path (Join-Path $publish "*") -DestinationPath $archive -CompressionLevel Optimal
+
+          $checksum = "$archive.sha256"
+          $hash = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  $([IO.Path]::GetFileName($archive))" |
+            Set-Content -LiteralPath $checksum -Encoding ascii
+
+          "archive=$archive" >> $env:GITHUB_OUTPUT
+          "checksum=$checksum" >> $env:GITHUB_OUTPUT
+
+      - name: Attest archive provenance
+        uses: actions/attest-build-provenance@v4.2.2
+        with:
+          subject-path: ${{ steps.package.outputs.archive }}
+
+      - name: Create GitHub release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ARCHIVE_PATH: ${{ steps.package.outputs.archive }}
+          CHECKSUM_PATH: ${{ steps.package.outputs.checksum }}
+        run: |
+          $arguments = @(
+            "release", "create", "${{ github.ref_name }}",
+            $env:ARCHIVE_PATH,
+            $env:CHECKSUM_PATH,
+            "--verify-tag",
+            "--generate-notes",
+            "--title", "TurboPilot $env:VERSION"
+          )
+          if ($env:IS_PRERELEASE -eq "true") {
+            $arguments += "--prerelease"
+          }
+
+          & gh @arguments
+          if ($LASTEXITCODE -ne 0) {
+            throw "GitHub release creation failed with exit code $LASTEXITCODE."
+          }
