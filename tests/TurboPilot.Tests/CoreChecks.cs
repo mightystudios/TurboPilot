@@ -43,11 +43,33 @@ internal static class CoreChecks
 		CheckSessionSnapshot();
 		CheckStorage();
 		await CheckExternalAssistantMessagesAsync();
+		await CheckTurnInterruptionDeadlineAsync();
 		await CheckQuestionsAsync();
 		await CheckEventsAsync();
 		await CheckToolRowsAsync();
 		CheckHistoryAndStatus();
 		Console.WriteLine("PASS configuration, history storage, questions, streaming events, tool rows, usage, prompt navigation, and external tools");
+	}
+
+	private static async Task CheckTurnInterruptionDeadlineAsync()
+	{
+		var idle = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+		var started = Stopwatch.GetTimestamp();
+		var confirmed = await ChatService.WaitForTurnInterruptionAsync(
+			_ => Task.Delay(Timeout.InfiniteTimeSpan),
+			idle.Task,
+			TimeSpan.FromMilliseconds(50));
+		Check.True(!confirmed && Stopwatch.GetElapsedTime(started) < TimeSpan.FromSeconds(2),
+			"A runtime that never confirms interruption must release the caller at the deadline.");
+
+		using var canceled = new CancellationTokenSource();
+		canceled.Cancel();
+		await Check.ThrowsAsync<OperationCanceledException>(() =>
+			ChatService.WaitForTurnInterruptionAsync(
+				_ => Task.CompletedTask,
+				Task.CompletedTask,
+				TimeSpan.FromSeconds(1),
+				canceled.Token));
 	}
 
 	private static async Task CheckExternalAssistantMessagesAsync()

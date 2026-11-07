@@ -18,6 +18,7 @@ public sealed partial class ChatService : IAsyncDisposable
 	private readonly object _sync = new();
 	private readonly SemaphoreSlim _lifecycle = new(1, 1);
 	private readonly SemaphoreSlim _sending = new(1, 1);
+	private readonly SemaphoreSlim _interrupting = new(1, 1);
 	private readonly SemaphoreSlim _keepAliveGate = new(1, 1);
 	private readonly CancellationTokenSource _lifetime = new();
 	private readonly Queue<PendingQuestion> _questions = new();
@@ -50,6 +51,7 @@ public sealed partial class ChatService : IAsyncDisposable
 	private DateTimeOffset _lastSubstantiveActivityAt;
 	private long _sessionAicNano;
 	private TaskCompletionSource? _turnIdle;
+	private CancellationTokenSource? _activeSendCancellation;
 	private StringBuilder? _capture;
 	private int _preparingHandoff;
 	private Task? _disposeTask;
@@ -69,6 +71,7 @@ public sealed partial class ChatService : IAsyncDisposable
 	private Task _planTail = Task.CompletedTask;
 	private string? _deferredTimeoutMessage;
 	private string? _failureMessage;
+	private static readonly TimeSpan TurnInterruptDeadline = TimeSpan.FromSeconds(5);
 
 	// Tool calls awaiting their outcome, so the completion can be
 	// written into the row the start opened rather than printed as a
@@ -356,7 +359,16 @@ public sealed partial class ChatService : IAsyncDisposable
 	public async Task SendAsync(string prompt, IReadOnlyList<string>? attachmentPaths = null, CancellationToken cancellationToken = default)
 	{
 		using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, _lifetime.Token);
+		if (IsWorking && !HasPendingQuestion && _session is { } activeSession)
+		{
+			var confirmed = await InterruptAsync(activeSession, linked.Token);
+			AddNotice(NoticeFormatter.Status(
+				confirmed ? "interrupted" : "warning",
+				confirmed ? "Previous turn stopped" : "Previous turn released after the runtime did not confirm its stop"));
+		}
 		await _sending.WaitAsync(linked.Token);
+		var sendingGateHeld = true;
+		CancellationTokenSource? turnCancellation = null;
 		try
 		{
 			var session = _session ?? throw new InvalidOperationException("No active session.");
@@ -382,8 +394,10 @@ public sealed partial class ChatService : IAsyncDisposable
 
 			if (_isWorking)
 			{
-				await InterruptAsync(session, linked.Token);
-				AddNotice(NoticeFormatter.Status("interrupted", "Previous turn stopped"));
+				var confirmed = await InterruptAsync(session, linked.Token);
+				AddNotice(NoticeFormatter.Status(
+					confirmed ? "interrupted" : "warning",
+					confirmed ? "Previous turn stopped" : "Previous turn released after the runtime did not confirm its stop"));
 			}
 			else if (replacesPendingQuestion)
 			{
@@ -416,6 +430,8 @@ public sealed partial class ChatService : IAsyncDisposable
 			_sessionAnchor ??= _turnAnchor;
 			lock (_sync)
 			{
+				_activeSendCancellation = turnCancellation =
+					CancellationTokenSource.CreateLinkedTokenSource(linked.Token);
 				_acceptQuestions = true;
 				_isWorking = true;
 				_turnStarted = Stopwatch.GetTimestamp();
@@ -428,7 +444,13 @@ public sealed partial class ChatService : IAsyncDisposable
 			StateChanged?.Invoke();
 			try
 			{
-				await session.SendAsync(message, linked.Token);
+				var sendTask = session.SendAsync(message, turnCancellation.Token);
+				// A tool can keep this SDK task alive indefinitely. Serialize
+				// dispatch, not the remote turn, so Stop and replacement sends
+				// never wait behind tool execution.
+				_sending.Release();
+				sendingGateHeld = false;
+				await sendTask;
 				if (carriesBootstrap && _record is not null)
 				{
 					lock (_sync)
@@ -446,40 +468,47 @@ public sealed partial class ChatService : IAsyncDisposable
 			{
 				lock (_sync)
 				{
-					_isWorking = wasWorking;
-					if (!wasWorking)
-						_turnStarted = 0;
-					_turnIdle?.TrySetResult();
+					if (ReferenceEquals(_activeSendCancellation, turnCancellation))
+					{
+						_isWorking = wasWorking;
+						if (!wasWorking)
+							_turnStarted = 0;
+						_turnIdle?.TrySetResult();
+					}
 				}
 				StateChanged?.Invoke();
 				throw;
 			}
+			finally
+			{
+				lock (_sync)
+				{
+					if (ReferenceEquals(_activeSendCancellation, turnCancellation))
+						_activeSendCancellation = null;
+				}
+				turnCancellation?.Dispose();
+			}
 		}
 		finally
 		{
-			_sending.Release();
+			if (sendingGateHeld)
+				_sending.Release();
 			StateChanged?.Invoke();
 		}
 	}
 
 	public async Task AbortAsync()
 	{
-		await _sending.WaitAsync(_lifetime.Token);
-		try
+		if (_session is not { } session)
 		{
-			if (_session is not { } session)
-			{
-				ReleaseQuestions();
-				return;
-			}
-			await InterruptAsync(session, _lifetime.Token);
-			AddNotice(NoticeFormatter.Status("stopped", "Turn interrupted"));
-			StateChanged?.Invoke();
+			ReleaseQuestions();
+			return;
 		}
-		finally
-		{
-			_sending.Release();
-		}
+		var confirmed = await InterruptAsync(session, _lifetime.Token);
+		AddNotice(NoticeFormatter.Status(
+			confirmed ? "stopped" : "warning",
+			confirmed ? "Turn interrupted" : "Turn released locally after the runtime did not confirm its stop"));
+		StateChanged?.Invoke();
 	}
 
 	/// <summary>
@@ -498,8 +527,10 @@ public sealed partial class ChatService : IAsyncDisposable
 			var session = _session ?? throw new InvalidOperationException("No active session.");
 			if (_isWorking)
 			{
-				await InterruptAsync(session, linked.Token);
-				AddNotice(NoticeFormatter.Status("interrupted", "Previous turn stopped"));
+				var confirmed = await InterruptAsync(session, linked.Token);
+				AddNotice(NoticeFormatter.Status(
+					confirmed ? "interrupted" : "warning",
+					confirmed ? "Previous turn stopped" : "Previous turn released after the runtime did not confirm its stop"));
 			}
 			AddNotice(await CompactAsync(session, linked.Token));
 		}
@@ -527,22 +558,90 @@ public sealed partial class ChatService : IAsyncDisposable
 	}
 #pragma warning restore GHCP001
 
-	private async Task InterruptAsync(CopilotSession session, CancellationToken cancellationToken)
+	private async Task<bool> InterruptAsync(CopilotSession session, CancellationToken cancellationToken)
 	{
 		Task idle;
+		CancellationTokenSource? activeSend;
 		lock (_sync)
 		{
 			ReleaseQuestions();
 			if (!_isWorking)
-				return;
+				return true;
 			_turnIdle ??= new(TaskCreationOptions.RunContinuationsAsynchronously);
 			idle = _turnIdle.Task;
+			activeSend = _activeSendCancellation;
 		}
-		await session.AbortAsync(cancellationToken);
-		// Abort is asynchronous. The runtime owns the transition to idle,
-		// so wait for that real completion signal instead of reporting an
-		// arbitrary local deadline while shutdown is still underway.
-		await idle.WaitAsync(cancellationToken);
+		try { activeSend?.Cancel(); }
+		catch (ObjectDisposedException) { }
+
+		await _interrupting.WaitAsync(cancellationToken);
+		try
+		{
+			if (!IsWorking && activeSend is null)
+				return true;
+			var confirmed = await WaitForTurnInterruptionAsync(
+				token => session.AbortAsync(token),
+				idle,
+				TurnInterruptDeadline,
+				cancellationToken,
+				_lifetime.Token);
+			if (confirmed)
+				return true;
+			ReleaseStalledTurn();
+			return false;
+		}
+		finally
+		{
+			_interrupting.Release();
+		}
+	}
+
+	internal static async Task<bool> WaitForTurnInterruptionAsync(
+		Func<CancellationToken, Task> abort,
+		Task idle,
+		TimeSpan deadline,
+		CancellationToken cancellationToken = default,
+		CancellationToken lifetimeToken = default)
+	{
+		ArgumentNullException.ThrowIfNull(abort);
+		ArgumentNullException.ThrowIfNull(idle);
+		if (deadline <= TimeSpan.Zero)
+			throw new ArgumentOutOfRangeException(nameof(deadline));
+
+		using var deadlineSource = new CancellationTokenSource(deadline);
+		using var linked = CancellationTokenSource.CreateLinkedTokenSource(
+			cancellationToken, lifetimeToken, deadlineSource.Token);
+		try
+		{
+			linked.Token.ThrowIfCancellationRequested();
+			await abort(linked.Token).WaitAsync(linked.Token);
+			await idle.WaitAsync(linked.Token);
+			return true;
+		}
+		catch (OperationCanceledException) when (
+			deadlineSource.IsCancellationRequested
+			&& !cancellationToken.IsCancellationRequested
+			&& !lifetimeToken.IsCancellationRequested)
+		{
+			return false;
+		}
+	}
+
+	private void ReleaseStalledTurn()
+	{
+		lock (_sync)
+		{
+			_isWorking = false;
+			_turnStarted = 0;
+			_deferredTimeoutMessage = null;
+			_turnIdle?.TrySetResult();
+			_streamedMessages.Clear();
+			_completedMessages.Clear();
+			_messageBuffers.Clear();
+			SettleToolCalls();
+			ReleaseQuestions();
+		}
+		StateChanged?.Invoke();
 	}
 
 	private async Task MaintainSessionAsync()

@@ -774,6 +774,55 @@ internal static class UiChecks
 			Check.Equal("unsent draft", Input(window), "Restore the unsent draft with the down arrow");
 			Console.WriteLine("PASS WPF startup, Send, compact status, prompt arrows, Raw, rendered markdown, and Mermaid");
 
+			var heldForReplacement = new LocalProvider.Reply("This reply must be replaced.", Hold: true);
+			provider.Replies.Enqueue(heldForReplacement);
+			SetInput(window, "start a replaceable UI turn");
+			Click(window, "buttonSend");
+			await heldForReplacement.Started.Task.WaitAsync(TimeSpan.FromSeconds(15));
+			await Check.UntilAsync(
+				() => Status(window).StartsWith("Working.."),
+				"The replaceable UI turn did not start.");
+			Check.True(
+				Control<Button>(window, "buttonSend").IsEnabled
+				&& Control<Button>(window, "buttonStop").IsEnabled
+				&& Control<RichTextBox>(window, "richTextBoxInput").IsEnabled,
+				"Send, Stop, and prompt input must remain available during an active turn.");
+			var replacement = new LocalProvider.Reply("Responsive replacement completed.");
+			provider.Replies.Enqueue(replacement);
+			try
+			{
+				SetInput(window, "replace the active UI turn");
+				Click(window, "buttonSend");
+				await replacement.Started.Task.WaitAsync(TimeSpan.FromSeconds(10));
+				await Check.UntilAsync(
+					() => Status(window).StartsWith("Ready..")
+						&& window.OutputText.Contains("Responsive replacement completed."),
+					"Send did not replace the active UI turn.");
+			}
+			finally
+			{
+				heldForReplacement.Release.TrySetResult();
+			}
+
+			var heldForStop = new LocalProvider.Reply("This reply must be stopped.", Hold: true);
+			provider.Replies.Enqueue(heldForStop);
+			SetInput(window, "start a stoppable UI turn");
+			Click(window, "buttonSend");
+			await heldForStop.Started.Task.WaitAsync(TimeSpan.FromSeconds(15));
+			try
+			{
+				Click(window, "buttonStop");
+				await Check.UntilAsync(
+					() => Status(window).StartsWith("Ready..")
+						&& Control<Button>(window, "buttonSend").IsEnabled,
+					"Stop did not release the active UI turn.");
+			}
+			finally
+			{
+				heldForStop.Release.TrySetResult();
+			}
+			Console.WriteLine("PASS WPF Send and Stop remain responsive during active work");
+
 			// Cues ride the same transitions the status line reports, so
 			// the question flow below exercises all three: a prompt
 			// leaves, the model stops to ask, and the turn finishes.

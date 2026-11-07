@@ -101,7 +101,7 @@ public partial class MainWindow : TurbolandWindow
 	private CancellationTokenSource? _restartCancellation;
 	private bool _sessionChanging;
 	private bool _summarizingSession;
-	private bool _sendingInput;
+	private int _sendingInputs;
 	private bool _closing;
 	private bool _closeRequested;
 	private bool _closeApproved;
@@ -272,15 +272,15 @@ public partial class MainWindow : TurbolandWindow
 		// session, so they stay usable while a turn is running.
 		menuSessionDetails.IsEnabled = active && !_closing;
 		menuSaveTranscript.IsEnabled = _chat is not null && !_closing;
-		menuCompactContext.IsEnabled = ready && !_sendingInput;
-		menuResetContext.IsEnabled = ready && !_sendingInput;
+		menuCompactContext.IsEnabled = ready && !IsSendingInput;
+		menuResetContext.IsEnabled = ready && !IsSendingInput;
 
 		richTextBoxInput.IsEnabled = ready;
 		UpdateHistoryButtons();
 
-		buttonAttachments.IsEnabled = ready && !_sendingInput;
+		buttonAttachments.IsEnabled = ready;
 		buttonStop.IsEnabled = ready && _chat is not null && (_chat.IsWorking || _chat.HasPendingQuestion);
-		buttonSend.IsEnabled = ready && !_sendingInput;
+		buttonSend.IsEnabled = ready;
 
 		// The prompt box only accepts typing while a session is running.
 		richTextBoxInput.IsReadOnly = !ready;
@@ -1264,7 +1264,7 @@ public partial class MainWindow : TurbolandWindow
 	/// </summary>
 	private void UpdateHistoryButtons()
 	{
-		var enabled = IsSessionActive && !_sessionChanging && !_closing && !_sendingInput;
+		var enabled = IsSessionActive && !_sessionChanging && !_closing;
 		buttonHistoryPrev.IsEnabled = enabled && _promptHistory.CanGoBack;
 		buttonHistoryNext.IsEnabled = enabled && _promptHistory.CanGoForward;
 	}
@@ -1489,9 +1489,8 @@ public partial class MainWindow : TurbolandWindow
 				"The session connected without an active chat service.");
 			_promptHistory.Add(launch.Request.InitialPrompt);
 			UpdateHistoryButtons();
-			_sendingInput = true;
+			BeginSendingInput();
 			Sounds.PlayPromptSent();
-			SetSessionActive(true);
 			await SessionLaunch.SubmitInitialPromptAsync(
 				chat, launch.Request, cancellation.Token);
 			status.Connected();
@@ -1514,8 +1513,7 @@ public partial class MainWindow : TurbolandWindow
 			if (ReferenceEquals(_restartCancellation, cancellation))
 				_restartCancellation = null;
 			_sessionChanging = false;
-			_sendingInput = false;
-			RefreshChatState();
+			EndSendingInput();
 		}
 	}
 
@@ -1712,8 +1710,7 @@ public partial class MainWindow : TurbolandWindow
 			return;
 		if (!YesNoDialog.Ask(this, WorkspaceReadme.Question(readme), "Project Readme"))
 			return;
-		_sendingInput = true;
-		SetSessionActive(IsSessionActive);
+		BeginSendingInput();
 		try { await chat.SendAsync(WorkspaceReadme.Prompt(readme), [readme]); }
 		catch (OperationCanceledException) { }
 		catch (Exception ex)
@@ -1723,8 +1720,7 @@ public partial class MainWindow : TurbolandWindow
 		}
 		finally
 		{
-			_sendingInput = false;
-			RefreshChatState();
+			EndSendingInput();
 		}
 	}
 
@@ -1947,6 +1943,21 @@ public partial class MainWindow : TurbolandWindow
 		}
 		if (ReferenceEquals(_chat, chat))
 			action();
+	}
+
+	private bool IsSendingInput => _sendingInputs > 0;
+
+	private void BeginSendingInput()
+	{
+		_sendingInputs++;
+		SetSessionActive(IsSessionActive);
+	}
+
+	private void EndSendingInput()
+	{
+		if (_sendingInputs > 0)
+			_sendingInputs--;
+		RefreshChatState();
 	}
 
 	private void StartExternalAssistantMessageMonitor(ChatService chat, string sessionId)
@@ -2205,7 +2216,7 @@ public partial class MainWindow : TurbolandWindow
 	private async Task SendCurrentInputAsync()
 	{
 		var chat = _chat;
-		if (chat is null || _sessionChanging || _sendingInput || _closing) return;
+		if (chat is null || _sessionChanging || _closing) return;
 
 		var text = GetInputText();
 		if (string.IsNullOrWhiteSpace(text) && _attachments.Count == 0) return;
@@ -2245,31 +2256,35 @@ public partial class MainWindow : TurbolandWindow
 		}
 
 		var attachments = resolution.Attachments.ToArray();
-		_sendingInput = true;
+		var directAttachments = _attachments.ToArray();
+		richTextBoxInput.Document.Blocks.Clear();
+		_attachments.Clear();
+		UpdateAttachmentButton();
+		BeginSendingInput();
 		Sounds.PlayPromptSent();
-		SetSessionActive(IsSessionActive);
 		try
 		{
 			await chat.SendAsync(text, attachments);
-			if (ReferenceEquals(_chat, chat))
-			{
-				if (GetInputText() == text)
-					richTextBoxInput.Document.Blocks.Clear();
-				_attachments.Clear();
-				UpdateAttachmentButton();
-			}
 		}
 		catch (OperationCanceledException)
 		{
 		}
 		catch (Exception ex)
 		{
-			ForActiveChat(chat, () => chat.AddNotice("[error] Send failed: " + ex.Message));
+			ForActiveChat(chat, () =>
+			{
+				if (string.IsNullOrWhiteSpace(GetInputText()) && _attachments.Count == 0)
+				{
+					SetInputText(text);
+					_attachments.AddRange(directAttachments);
+					UpdateAttachmentButton();
+				}
+				chat.AddNotice("[error] Send failed: " + ex.Message);
+			});
 		}
 		finally
 		{
-			_sendingInput = false;
-			RefreshChatState();
+			EndSendingInput();
 		}
 	}
 
@@ -2680,14 +2695,13 @@ public partial class MainWindow : TurbolandWindow
 	private async void OnCompactContext(object sender, RoutedEventArgs e)
 	{
 		var chat = _chat;
-		if (chat is null || !IsSessionActive || _sendingInput || _closing) return;
+		if (chat is null || !IsSessionActive || IsSendingInput || _closing) return;
 		if (!YesNoDialog.Ask(this,
 			"Compact this session's context? Older turns are replaced by a summary.\r\n\r\n"
 			+ "The transcript on screen is unchanged.", "Compact Context"))
 			return;
 
-		_sendingInput = true;
-		SetSessionActive(IsSessionActive);
+		BeginSendingInput();
 		try { await chat.CompactContextAsync(); }
 		catch (OperationCanceledException) { }
 		catch (Exception ex)
@@ -2697,8 +2711,7 @@ public partial class MainWindow : TurbolandWindow
 		}
 		finally
 		{
-			_sendingInput = false;
-			RefreshChatState();
+			EndSendingInput();
 		}
 	}
 
@@ -2711,7 +2724,7 @@ public partial class MainWindow : TurbolandWindow
 	private async void OnResetContext(object sender, RoutedEventArgs e)
 	{
 		var chat = _chat;
-		if (chat is null || !IsSessionActive || _sendingInput || _closing) return;
+		if (chat is null || !IsSessionActive || IsSendingInput || _closing) return;
 		var disposition = SessionDispositionDialog.Choose(this,
 			"Reset Context ends the current session and starts a new conversation with the same settings.\r\n\r\n"
 			+ "Storing keeps the previous transcript on screen. Abandoning clears it.");
