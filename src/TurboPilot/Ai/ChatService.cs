@@ -3,6 +3,7 @@ using System.Globalization;
 using System.IO;
 using System.Text;
 using GitHub.Copilot;
+using TurboPilot.Orchestration;
 using TurboPilot.Permissions;
 using TurboPilot.Rendering;
 using TurboPilot.Sessions;
@@ -1150,6 +1151,18 @@ public sealed partial class ChatService : IAsyncDisposable
 			rendered is null ? null : "\r\n\r\n" + rendered + "\r\n\r\n");
 
 	internal void AddNotice((string Text, string Rendered) notice) => AddNotice(notice.Text, notice.Rendered);
+
+	internal void AddExternalAssistantMessage(ExternalAssistantMessage message)
+	{
+		ObjectDisposedException.ThrowIf(_disposeStarted != 0, this);
+		var rendered = "\r\n\r\n" + message.Content + "\r\n\r\n";
+		EmitTranscript(
+			"\r\n" + message.Content + "\r\n\r\n",
+			"external:" + message.MessageId,
+			rendered);
+		if (_options.LinkFiles)
+			QueueFormatting("external:" + message.MessageId, rendered);
+	}
 
 	/// <summary>
 	/// Rereads the agent's plan and shows it two ways: a position in the

@@ -199,6 +199,15 @@ public sealed class SessionStore
 			if (File.Exists(path))
 				File.Delete(path);
 		}
+		var inbox = ExternalAssistantMessageInbox(sessionId);
+		if (Directory.Exists(inbox))
+			Directory.Delete(inbox, recursive: true);
+	}
+
+	internal string ExternalAssistantMessageInbox(string sessionId)
+	{
+		ValidateSessionId(sessionId);
+		return Path.Combine(_directory, "external-assistant-messages", sessionId);
 	}
 
 	public string ReadTranscript(string sessionId) => File.ReadAllText(FilePath(sessionId, ".md"));
@@ -248,10 +257,15 @@ public sealed class SessionStore
 
 	private string FilePath(string sessionId, string extension)
 	{
+		ValidateSessionId(sessionId);
+		return Path.Combine(_directory, sessionId + extension);
+	}
+
+	private static void ValidateSessionId(string sessionId)
+	{
 		if (string.IsNullOrWhiteSpace(sessionId) || sessionId.Length > 160
 			|| sessionId is "." or ".."
 			|| !sessionId.All(character => char.IsAsciiLetterOrDigit(character) || character is '-' or '_' or '.'))
 			throw new ArgumentException("Invalid session ID.", nameof(sessionId));
-		return Path.Combine(_directory, sessionId + extension);
 	}
 }

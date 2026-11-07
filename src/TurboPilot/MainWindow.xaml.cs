@@ -109,6 +109,7 @@ public partial class MainWindow : TurbolandWindow
 	private SessionStatusController? _launchStatus;
 	private ValidatedSessionLaunchRequest? _externalLaunch;
 	private SessionControlMonitor? _sessionControl;
+	private ExternalAssistantMessageMonitor? _externalAssistantMessages;
 
 	// Model and session id of the live session. The badge shows the model
 	// over the workspace folder; the id identifies the session elsewhere.
@@ -1766,6 +1767,8 @@ public partial class MainWindow : TurbolandWindow
 		if (disposition is null)
 			return false;
 
+		_externalAssistantMessages?.Dispose();
+		_externalAssistantMessages = null;
 		var sessionId = chat.SessionId ?? _sessionId;
 		try
 		{
@@ -1897,6 +1900,7 @@ public partial class MainWindow : TurbolandWindow
 
 			cancellation.Token.ThrowIfCancellationRequested();
 			_sessionId = chat.SessionId ?? throw new InvalidOperationException("The runtime did not return a session ID.");
+			StartExternalAssistantMessageMonitor(chat, _sessionId);
 			_firstAttachmentPickerDirectory = options.WorkspaceFolder;
 			if (_historySessions.Add(_sessionId) && resumeId is not null && chat.Record is { } saved)
 			{
@@ -1943,6 +1947,23 @@ public partial class MainWindow : TurbolandWindow
 		}
 		if (ReferenceEquals(_chat, chat))
 			action();
+	}
+
+	private void StartExternalAssistantMessageMonitor(ChatService chat, string sessionId)
+	{
+		_externalAssistantMessages?.Dispose();
+		var monitor = new ExternalAssistantMessageMonitor(
+			_sessionStore.ExternalAssistantMessageInbox(sessionId),
+			sessionId,
+			message => Dispatcher.InvokeAsync(() =>
+			{
+				if (!ReferenceEquals(_chat, chat)
+					|| !string.Equals(_sessionId, message.SessionId, StringComparison.Ordinal))
+					throw new InvalidOperationException("The targeted TurboPilot session is no longer active.");
+				chat.AddExternalAssistantMessage(message);
+			}).Task);
+		monitor.Start();
+		_externalAssistantMessages = monitor;
 	}
 
 	/// <summary>
@@ -2935,6 +2956,8 @@ public partial class MainWindow : TurbolandWindow
 
 	protected override void OnClosed(EventArgs e)
 	{
+		_externalAssistantMessages?.Dispose();
+		_externalAssistantMessages = null;
 		_sessionControl?.Dispose();
 		_sessionControl = null;
 		_launchStatus?.Closed();

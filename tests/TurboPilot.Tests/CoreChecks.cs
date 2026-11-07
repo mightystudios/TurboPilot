@@ -1,6 +1,8 @@
+using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.IO;
 using System.Text;
+using System.Text.Json;
 using System.Windows;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
@@ -10,6 +12,7 @@ using TurboPilot.Ai;
 using TurboPilot.Commands;
 using TurboPilot.Customizations;
 using TurboPilot.Dialogs;
+using TurboPilot.Orchestration;
 using TurboPilot.Permissions;
 using TurboPilot.Rendering;
 using TurboPilot.Sessions;
@@ -39,11 +42,134 @@ internal static class CoreChecks
 		CheckWorkspaceChanges();
 		CheckSessionSnapshot();
 		CheckStorage();
+		await CheckExternalAssistantMessagesAsync();
 		await CheckQuestionsAsync();
 		await CheckEventsAsync();
 		await CheckToolRowsAsync();
 		CheckHistoryAndStatus();
 		Console.WriteLine("PASS configuration, history storage, questions, streaming events, tool rows, usage, prompt navigation, and external tools");
+	}
+
+	private static async Task CheckExternalAssistantMessagesAsync()
+	{
+		using var workspace = new TestWorkspace();
+		const string sessionId = "external-message-session";
+		var inbox = workspace.Store.ExternalAssistantMessageInbox(sessionId);
+		var delivered = new ConcurrentQueue<ExternalAssistantMessage>();
+		string hostId;
+		using (var monitor = new ExternalAssistantMessageMonitor(
+			inbox,
+			sessionId,
+			message =>
+			{
+				delivered.Enqueue(message);
+				return Task.CompletedTask;
+			}))
+		{
+			monitor.Start();
+			hostId = monitor.HostId;
+			Check.True(File.Exists(monitor.HostPath),
+				"Expose a host marker while the targeted session is active.");
+
+			const string messageId = "progress-1";
+			const string content = "Attempt progress: decision 20.";
+			WriteExternalAssistantRequest(
+				inbox,
+				messageId,
+				sessionId,
+				hostId,
+				content,
+				ExternalAssistantMessageMonitor.Sha256(content));
+			var acknowledgmentPath = Path.Combine(inbox, messageId + ".ack.json");
+			await Check.UntilAsync(
+				() => File.Exists(acknowledgmentPath),
+				"The external assistant message was not acknowledged.");
+			using (var document = JsonDocument.Parse(File.ReadAllText(acknowledgmentPath)))
+			{
+				var root = document.RootElement;
+				Check.True(
+					root.GetProperty("delivered").GetBoolean()
+					&& root.GetProperty("presentedToUser").GetBoolean()
+					&& root.GetProperty("hostId").GetString() == hostId,
+					"Acknowledge only after the active host delivers the message.");
+			}
+			Check.True(delivered.TryPeek(out var message)
+				&& message.MessageId == messageId
+				&& message.SessionId == sessionId
+				&& message.Content == content,
+				"Deliver the exact targeted assistant message.");
+			WriteExternalAssistantRequest(
+				inbox,
+				messageId,
+				sessionId,
+				hostId,
+				content,
+				ExternalAssistantMessageMonitor.Sha256(content));
+			await Task.Delay(250);
+			Check.Equal(1, delivered.Count,
+				"Do not redeliver a message that already has an acknowledgment.");
+
+			WriteExternalAssistantRequest(
+				inbox,
+				"wrong-session",
+				"another-session",
+				hostId,
+				content,
+				ExternalAssistantMessageMonitor.Sha256(content));
+			var rejectedPath = Path.Combine(inbox, "wrong-session.ack.json");
+			await Check.UntilAsync(
+				() => File.Exists(rejectedPath),
+				"The wrong-session message was not rejected.");
+			using (var document = JsonDocument.Parse(File.ReadAllText(rejectedPath)))
+			{
+				Check.True(
+					!document.RootElement.GetProperty("delivered").GetBoolean()
+					&& document.RootElement.GetProperty("error").GetString()!
+						.Contains("another session", StringComparison.OrdinalIgnoreCase),
+					"Reject a message addressed to another session.");
+			}
+			Check.Equal(1, delivered.Count, "Do not deliver rejected messages.");
+		}
+
+		Check.True(!File.Exists(Path.Combine(inbox, ExternalAssistantMessageMonitor.HostFileName)),
+			"Remove the host marker when the session stops accepting messages.");
+
+		var chat = new ChatService(workspace.Store);
+		string? raw = null;
+		string? rendered = null;
+		chat.TranscriptReceived += text => raw += text;
+		chat.RenderedReceived += text => rendered += text;
+		chat.AddExternalAssistantMessage(new ExternalAssistantMessage(
+			"progress-2",
+			sessionId,
+			"Attempt progress: decision 40.",
+			ExternalAssistantMessageMonitor.Sha256("Attempt progress: decision 40.")));
+		Check.True(raw?.Contains("Attempt progress: decision 40.", StringComparison.Ordinal) == true
+			&& rendered?.Contains("Attempt progress: decision 40.", StringComparison.Ordinal) == true,
+			"Render an external delivery through the normal assistant transcript path.");
+		await chat.DisposeAsync();
+	}
+
+	private static void WriteExternalAssistantRequest(
+		string inbox,
+		string messageId,
+		string sessionId,
+		string hostId,
+		string content,
+		string digest)
+	{
+		Directory.CreateDirectory(inbox);
+		var path = Path.Combine(inbox, messageId + ".request.json");
+		File.WriteAllText(path, JsonSerializer.Serialize(new
+		{
+			contractVersion = ExternalAssistantMessageMonitor.CurrentContractVersion,
+			kind = ExternalAssistantMessageMonitor.MessageKind,
+			messageId,
+			sessionId,
+			hostId,
+			content,
+			contentSha256 = digest,
+		}));
 	}
 
 	private static void CheckContextTiers()
