@@ -7,6 +7,9 @@
   "supportsSessionControl": true,
   "controlTransport": "json-file",
   "controlContractVersion": "1.0",
+  "supportsExternalAssistantMessages": true,
+  "externalAssistantMessageTransport": "json-file",
+  "externalAssistantMessageContractVersion": "1.0",
   "controlActions": [
     "replace",
     "close"

@@ -79,6 +79,9 @@ def write_capabilities(root: Path, **overrides: object) -> Path:
         "supportsSessionControl": True,
         "controlTransport": "json-file",
         "controlContractVersion": "1.0",
+        "supportsExternalAssistantMessages": True,
+        "externalAssistantMessageTransport": "json-file",
+        "externalAssistantMessageContractVersion": "1.0",
         "controlActions": ["replace", "close"],
         "controlDispositions": ["abandon", "summarize_and_store"],
         "sessionStates": [
@@ -290,6 +293,12 @@ class PhaseRunnerTests(unittest.TestCase):
         write_capabilities(self.root, supportsSessionControl=False)
 
         with self.assertRaisesRegex(RunnerError, "supportsSessionControl"):
+            self.start()
+
+    def test_start_rejects_missing_external_assistant_message_capability(self) -> None:
+        write_capabilities(self.root, supportsExternalAssistantMessages=False)
+
+        with self.assertRaisesRegex(RunnerError, "supportsExternalAssistantMessages"):
             self.start()
 
     def test_progress_and_completion_use_single_state(self) -> None:

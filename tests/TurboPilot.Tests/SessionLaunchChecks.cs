@@ -346,6 +346,11 @@ internal static class SessionLaunchChecks
 			&& root.GetProperty("controlContractVersion").GetString()
 				== SessionControlCommand.CurrentContractVersion,
 			"Advertise the opt-in session control contract");
+		Check.True(root.GetProperty("supportsExternalAssistantMessages").GetBoolean()
+			&& root.GetProperty("externalAssistantMessageTransport").GetString() == "json-file"
+			&& root.GetProperty("externalAssistantMessageContractVersion").GetString()
+				== ExternalAssistantMessageMonitor.CurrentContractVersion,
+			"Advertise the external assistant message relay contract");
 		var actions = root.GetProperty("controlActions").EnumerateArray()
 			.Select(item => item.GetString()).ToHashSet(StringComparer.Ordinal);
 		Check.True(actions.SetEquals(new[]

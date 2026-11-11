@@ -41,7 +41,8 @@ TurboPilot exports these paths to every child session:
 ## Requirements
 
 - Python 3.10 or newer.
-- A TurboPilot build that advertises session launch and control contract `1.0`.
+- A TurboPilot build that advertises session launch, control, and external
+  assistant message contract `1.0`.
 - No third-party Python packages.
 
 TurboPilot must support:
@@ -49,7 +50,9 @@ TurboPilot must support:
 - `--launch-request`
 - JSON request, status, and control files
 - `replace` and `close` control actions
-- `abandon` and `summarize_and_store` dispositions.
+- `abandon` and `summarize_and_store` dispositions
+- a session-scoped external assistant message host that acknowledges only after
+  presenting the message in the active conversation.
 
 The built-in workflow uses these customizations:
 

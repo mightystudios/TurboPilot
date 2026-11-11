@@ -50,6 +50,19 @@ The publish folder must contain at least:
 - `session-launch-capabilities.json`
 - `runtimes\win-x64\native\copilot.exe`
 
+The capability marker must advertise `supportsExternalAssistantMessages: true`.
+This prevents phase tooling from launching a stale executable that cannot
+present durable progress reports.
+
+For a validated local deployment, run:
+
+```powershell
+pwsh .\scripts\publish-local.ps1
+```
+
+The script refuses to replace a deployment while its `TurboPilot.exe` is
+running.
+
 ## Create a release
 
 Create and push the tag only after both repositories are available remotely:

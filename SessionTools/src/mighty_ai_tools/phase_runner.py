@@ -948,6 +948,9 @@ def _validate_capabilities(executable: Path) -> None:
         "supportsSessionControl": True,
         "controlTransport": "json-file",
         "controlContractVersion": SCHEMA_VERSION,
+        "supportsExternalAssistantMessages": True,
+        "externalAssistantMessageTransport": "json-file",
+        "externalAssistantMessageContractVersion": SCHEMA_VERSION,
     }
     for key, expected in expected_scalars.items():
         if marker.get(key) != expected:
