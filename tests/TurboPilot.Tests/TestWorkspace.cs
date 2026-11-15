@@ -74,6 +74,19 @@ internal sealed class TestWorkspace : IDisposable
 		catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
 		{
 		}
-		Directory.Delete(Root, recursive: true);
+		for (var attempt = 0; ; attempt++)
+		{
+			try
+			{
+				Directory.Delete(Root, recursive: true);
+				return;
+			}
+			catch (Exception ex) when (
+				attempt < 50
+				&& ex is IOException or UnauthorizedAccessException)
+			{
+				Thread.Sleep(100);
+			}
+		}
 	}
 }

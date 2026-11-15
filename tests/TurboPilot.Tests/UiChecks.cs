@@ -1071,6 +1071,69 @@ internal static class UiChecks
 				"The external launch window did not report idle after its automatic turn.");
 
 			var initialSessionId = Field<ChatService>(window, "_chat").SessionId;
+			var continuationPrompt = "Continue the existing externally controlled session.";
+			var continuation = new SessionControlCommand
+			{
+				ContractVersion = SessionControlCommand.CurrentContractVersion,
+				CommandId = "ui-continue",
+				TargetProcessId = Environment.ProcessId,
+				TargetLaunchId = request.LaunchId,
+				TargetSessionId = initialSessionId,
+				Action = SessionControlActions.Continue,
+				Prompt = continuationPrompt,
+				Attachments = [workOrder],
+			};
+			var continuationReply = new LocalProvider.Reply("UI continuation reply.", Hold: true);
+			provider.Replies.Enqueue(continuationReply);
+			WriteSessionControl(request.SessionControlPath, continuation);
+			await continuationReply.Started.Task.WaitAsync(TimeSpan.FromSeconds(45));
+			SessionStatusRecord? continuationStatus = null;
+			for (var attempt = 0; attempt < 180; attempt++)
+			{
+				continuationStatus = ReadLaunchStatus(request.SessionStatusPath);
+				if (continuationStatus.LastControlCommandId == continuation.CommandId)
+					break;
+				await Task.Delay(250);
+			}
+			Check.True(
+				continuationStatus?.LastControlCommandId == continuation.CommandId
+					&& continuationStatus.LastControlCommandState is
+						SessionControlCommandStates.Received
+						or SessionControlCommandStates.Completed,
+				"The same-session continuation acknowledgement was "
+				+ $"{continuationStatus?.LastControlCommandId ?? "<none>"}/"
+				+ $"{continuationStatus?.LastControlCommandState ?? "<none>"}: "
+				+ $"{continuationStatus?.LastControlCommandError ?? "<no error>"}");
+			Check.True(
+				Field<ChatService>(window, "_chat").SessionId == initialSessionId
+				&& Field<ChatService>(window, "_chat").IsWorking
+				&& provider.Requests.Count == before + 2,
+				"Continue must submit one turn without replacing the active session.");
+			var continuationSent = provider.Requests.Last().GetRawText();
+			Check.True(
+				continuationSent.Contains(continuationPrompt, StringComparison.Ordinal)
+				&& continuationSent.Contains(workOrder.Replace("\\", "\\\\"), StringComparison.Ordinal)
+				&& workspace.Store.Load(initialSessionId!).Prompts.Contains(continuationPrompt),
+				"Continue must use normal prompt history and attachment delivery.");
+			continuationReply.Release.TrySetResult();
+			await Check.UntilAsync(
+				() =>
+				{
+					var current = ReadLaunchStatus(request.SessionStatusPath);
+					return current.State == SessionStatusStates.Idle
+						&& current.LastControlCommandId == continuation.CommandId
+						&& current.LastControlCommandState == SessionControlCommandStates.Completed;
+				},
+				"The same-session continuation did not complete and return to idle.",
+				timeoutSeconds: 45);
+
+			WriteSessionControl(
+				request.SessionControlPath,
+				continuation with { Prompt = "  " + continuationPrompt + "  " });
+			await Task.Delay(TimeSpan.FromSeconds(1));
+			Check.Equal(before + 2, provider.Requests.Count,
+				"Replaying the same continuation command ID must not submit another turn.");
+
 			WriteSessionControl(
 				request.SessionControlPath,
 				new SessionControlCommand
@@ -1129,7 +1192,7 @@ internal static class UiChecks
 				&& window.IsSessionActive
 				&& Field<ChatService>(window, "_chat").SessionId != initialSessionId,
 				"Replace the session in the same visible TurboPilot window with a fresh context.");
-			Check.Equal(before + 2, provider.Requests.Count,
+			Check.Equal(before + 3, provider.Requests.Count,
 				"The replacement command must submit exactly one new initial prompt");
 			var replacementSent = provider.Requests.Last().GetRawText();
 			Check.True(replacementSent.Contains(replacement.InitialPrompt, StringComparison.Ordinal)
@@ -1165,7 +1228,8 @@ internal static class UiChecks
 				&& replacementFinal.LastControlCommandId == "ui-close"
 				&& replacementFinal.LastControlCommandState == SessionControlCommandStates.Completed,
 				"The closed launch must acknowledge the command in its final health record.");
-			Console.WriteLine("PASS WPF external launch, remote replacement, and remote close");
+			Console.WriteLine(
+				"PASS WPF external launch, same-session continuation, remote replacement, and remote close");
 		}
 		finally
 		{

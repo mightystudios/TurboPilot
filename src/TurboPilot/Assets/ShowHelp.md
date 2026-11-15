@@ -240,7 +240,7 @@ Local tools can start TurboPilot with a validated JSON request:
 TurboPilot.exe --launch-request "D:\absolute\path\launch-request.json"
 ```
 
-Published builds place `session-launch-capabilities.json` beside `TurboPilot.exe`. Read that file for the supported request, status, control, and external assistant message contracts before launching. Each process writes its own status file, accepts explicit replace or close commands without UI automation, and exposes a session-scoped relay host only while the matching chat is active.
+Published builds place `session-launch-capabilities.json` beside `TurboPilot.exe`. Read that file for the supported request, status, control, and external assistant message contracts before launching. Each process writes its own status file, accepts explicit continue, replace, or close commands without UI automation, and exposes a session-scoped relay host only while the matching chat is active. Continue targets one live idle session and submits a real user turn without replacing its context.
 
 ## Troubleshooting
 

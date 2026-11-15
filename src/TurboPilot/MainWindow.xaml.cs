@@ -109,6 +109,7 @@ public partial class MainWindow : TurbolandWindow
 	private SessionStatusController? _launchStatus;
 	private ValidatedSessionLaunchRequest? _externalLaunch;
 	private SessionControlMonitor? _sessionControl;
+	private readonly SessionControlCommandHistory _sessionControlHistory = new();
 	private ExternalAssistantMessageMonitor? _externalAssistantMessages;
 
 	// Model and session id of the live session. The badge shows the model
@@ -1577,19 +1578,116 @@ public partial class MainWindow : TurbolandWindow
 			status.ControlFailed(command.CommandId, "The TurboPilot window is already closing.");
 			return;
 		}
+		if (command.Action == SessionControlActions.Continue)
+		{
+			try
+			{
+				if (_sessionControlHistory.TryGet(command, out var previous))
+				{
+					ReplaySessionControlOutcome(status, command.CommandId, previous!);
+					return;
+				}
+			}
+			catch (SessionControlCommandException ex)
+			{
+				status.ControlFailed(command.CommandId, ex.Message);
+				return;
+			}
+		}
 
 		status.ControlReceived(command.CommandId);
+		if (command.Action == SessionControlActions.Continue)
+		{
+			_sessionControlHistory.Record(command, SessionControlCommandStates.Received);
+		}
 		try
 		{
 			if (command.Action == SessionControlActions.Close)
 				await CloseFromSessionControlAsync(command, status);
-			else
+			else if (command.Action == SessionControlActions.Replace)
 				await ReplaceFromSessionControlAsync(command, launch, status);
+			else
+			{
+				await ContinueFromSessionControlAsync(command, launch, status);
+				_sessionControlHistory.Record(command, SessionControlCommandStates.Completed);
+				status.ControlCompleted(command.CommandId);
+			}
 		}
 		catch (Exception ex)
 		{
+			if (command.Action == SessionControlActions.Continue)
+			{
+				_sessionControlHistory.Record(
+					command,
+					SessionControlCommandStates.Failed,
+					ex.Message);
+			}
 			status.ControlFailed(command.CommandId, ex.Message);
 			AppendOutput($"\r\n[error] External session control failed: {ex.Message}\r\n\r\n");
+		}
+	}
+
+	private static void ReplaySessionControlOutcome(
+		SessionStatusController status,
+		string commandId,
+		SessionControlCommandOutcome outcome)
+	{
+		if (outcome.State == SessionControlCommandStates.Completed)
+			status.ControlCompleted(commandId);
+		else if (outcome.State == SessionControlCommandStates.Failed)
+			status.ControlFailed(commandId, outcome.Error!);
+		else
+			status.ControlReceived(commandId);
+	}
+
+	private async Task ContinueFromSessionControlAsync(
+		SessionControlCommand command,
+		ValidatedSessionLaunchRequest launch,
+		SessionStatusController status)
+	{
+		var chat = _chat;
+		if (chat is null || !IsSessionActive)
+			throw new InvalidOperationException("The targeted TurboPilot session is not active.");
+		if (status.State != SessionStatusStates.Idle
+			|| _sessionChanging
+			|| IsSendingInput
+			|| chat.IsWorking
+			|| chat.HasPendingQuestion)
+		{
+			throw new InvalidOperationException(
+				"The session control action 'continue' requires a connected idle session.");
+		}
+		if (!string.Equals(command.TargetSessionId, _sessionId, StringComparison.Ordinal)
+			|| !string.Equals(command.TargetSessionId, chat.SessionId, StringComparison.Ordinal))
+		{
+			throw new InvalidOperationException(
+				$"The command targets session '{command.TargetSessionId}', "
+				+ $"not '{chat.SessionId}'.");
+		}
+		foreach (var attachment in command.Attachments)
+		{
+			if (!SessionControlCommandLoader.ContainsPath(launch.Request.Workspace, attachment))
+			{
+				throw new InvalidOperationException(
+					$"Attachment '{attachment}' must be contained by workspace "
+					+ $"'{launch.Request.Workspace}'.");
+			}
+		}
+
+		if (!string.IsNullOrWhiteSpace(command.Prompt))
+		{
+			_promptHistory.Add(command.Prompt);
+			UpdateHistoryButtons();
+		}
+		BeginSendingInput();
+		Sounds.PlayPromptSent();
+		try
+		{
+			await SessionLaunch.SubmitContinuationAsync(chat, command);
+		}
+		finally
+		{
+			EndSendingInput();
 		}
 	}
 

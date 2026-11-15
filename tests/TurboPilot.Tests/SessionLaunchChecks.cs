@@ -193,6 +193,43 @@ internal static class SessionLaunchChecks
 			&& parsedClose.SessionDisposition == SessionDisposition.SummarizeAndStore,
 			"Resolve a close command and its explicit disposition.");
 
+		var continuationAttachment = workspace.Write(
+			"workspace\\requests\\continuation.md",
+			"CONTINUATION_ATTACHMENT_SENTINEL");
+		var continuation = replace with
+		{
+			CommandId = "continue-1",
+			TargetSessionId = "fixture-session",
+			Action = "CONTINUE",
+			Disposition = SessionControlDispositions.Abandon,
+			LaunchRequestPath = null,
+			Prompt = "Continue the active phase.",
+			Attachments = [continuationAttachment],
+		};
+		var parsedContinuation = SessionControlCommandLoader.Parse(
+			JsonSerializer.Serialize(continuation, SessionLaunchRequest.JsonOptions));
+		Check.True(parsedContinuation.Action == SessionControlActions.Continue
+			&& parsedContinuation.TargetSessionId == "fixture-session"
+			&& parsedContinuation.Prompt == "Continue the active phase."
+			&& parsedContinuation.Attachments.SequenceEqual([Path.GetFullPath(continuationAttachment)]),
+			"Canonicalize a same-session continuation command.");
+
+		var history = new SessionControlCommandHistory();
+		Check.True(!history.TryGet(parsedContinuation, out _),
+			"An unseen continuation command must not replay.");
+		history.Record(parsedContinuation, SessionControlCommandStates.Received);
+		Check.True(history.TryGet(parsedContinuation, out var received)
+			&& received!.State == SessionControlCommandStates.Received,
+			"Record continuation receipt for idempotent replay.");
+		history.Record(parsedContinuation, SessionControlCommandStates.Completed);
+		Check.True(history.TryGet(parsedContinuation, out var completed)
+			&& completed!.State == SessionControlCommandStates.Completed,
+			"Update continuation history with its terminal outcome.");
+		Check.Throws<SessionControlCommandException>(() =>
+			history.TryGet(
+				parsedContinuation with { Prompt = "Different content." },
+				out _));
+
 		ExpectControlFailure(replace with { ContractVersion = "2.0" });
 		ExpectControlFailure(replace with { CommandId = " " });
 		ExpectControlFailure(replace with { TargetProcessId = 0 });
@@ -201,6 +238,44 @@ internal static class SessionLaunchChecks
 		ExpectControlFailure(replace with { Disposition = "keep" });
 		ExpectControlFailure(replace with { LaunchRequestPath = null });
 		ExpectControlFailure(close with { LaunchRequestPath = replacementPath });
+		ExpectControlFailure(replace with
+		{
+			TargetSessionId = "fixture-session",
+			Prompt = "Unexpected continuation.",
+		});
+		ExpectControlFailure(close with
+		{
+			TargetSessionId = "fixture-session",
+			Prompt = "Unexpected continuation.",
+		});
+		ExpectControlFailure(continuation with { TargetSessionId = " " });
+		ExpectControlFailure(continuation with
+		{
+			Prompt = " ",
+			Attachments = [],
+		});
+		ExpectControlFailure(continuation with
+		{
+			Prompt = new string('x', SessionControlCommand.MaximumPromptLength + 1),
+		});
+		ExpectControlFailure(continuation with
+		{
+			Attachments = Enumerable.Repeat(continuationAttachment,
+				SessionControlCommand.MaximumAttachments + 1).ToArray(),
+		});
+		ExpectControlFailure(continuation with
+		{
+			Attachments = ["relative.md"],
+		});
+		ExpectControlFailure(continuation with
+		{
+			Attachments = [Path.Combine(workspace.Workspace, "missing.md")],
+		});
+		ExpectControlFailure(continuation with
+		{
+			Disposition = SessionControlDispositions.SummarizeAndStore,
+		});
+		ExpectControlFailure(continuation with { LaunchRequestPath = replacementPath });
 		Check.Throws<SessionControlCommandException>(() =>
 			SessionControlCommandLoader.Parse("{not-json"));
 	}
@@ -346,6 +421,12 @@ internal static class SessionLaunchChecks
 			&& root.GetProperty("controlContractVersion").GetString()
 				== SessionControlCommand.CurrentContractVersion,
 			"Advertise the opt-in session control contract");
+		Check.True(root.GetProperty("supportsSessionContinuation").GetBoolean()
+			&& root.GetProperty("continuationPromptMaxCharacters").GetInt32()
+				== SessionControlCommand.MaximumPromptLength
+			&& root.GetProperty("continuationAttachmentLimit").GetInt32()
+				== SessionControlCommand.MaximumAttachments,
+			"Advertise same-session continuation limits.");
 		Check.True(root.GetProperty("supportsExternalAssistantMessages").GetBoolean()
 			&& root.GetProperty("externalAssistantMessageTransport").GetString() == "json-file"
 			&& root.GetProperty("externalAssistantMessageContractVersion").GetString()
@@ -355,6 +436,7 @@ internal static class SessionLaunchChecks
 			.Select(item => item.GetString()).ToHashSet(StringComparer.Ordinal);
 		Check.True(actions.SetEquals(new[]
 		{
+			SessionControlActions.Continue,
 			SessionControlActions.Replace,
 			SessionControlActions.Close,
 		}), "Advertise every session control action.");
@@ -514,6 +596,36 @@ internal static class SessionLaunchChecks
 		Check.True(noAttachmentMessage.Contains(noAttachmentRequest.InitialPrompt, StringComparison.Ordinal)
 			&& !noAttachmentMessage.Contains(workOrder.Replace("\\", "\\\\"), StringComparison.Ordinal),
 			"The launch helper must support an initial prompt without attachments.");
+
+		var continuation = SessionControlCommandLoader.Parse(
+			JsonSerializer.Serialize(new SessionControlCommand
+			{
+				ContractVersion = SessionControlCommand.CurrentContractVersion,
+				CommandId = "runtime-continue",
+				TargetProcessId = Environment.ProcessId,
+				TargetLaunchId = request.LaunchId,
+				TargetSessionId = chat.SessionId,
+				Action = SessionControlActions.Continue,
+				Prompt = "Continue the active runtime phase.",
+				Attachments = [workOrder],
+			}, SessionLaunchRequest.JsonOptions));
+		provider.Replies.Enqueue(new LocalProvider.Reply("Continuation reply."));
+		await SessionLaunch.SubmitContinuationAsync(chat, continuation);
+		await Check.UntilAsync(
+			() => !chat.IsWorking
+				&& ReadStatus(request.SessionStatusPath).State == SessionStatusStates.Idle,
+			"The same-session continuation turn did not return to idle.");
+		var continuationMessage = provider.Requests.Last()
+			.GetProperty("messages")
+			.EnumerateArray()
+			.Last(message => message.GetProperty("role").GetString() == "user")
+			.GetRawText();
+		var continuationPrompt = continuation.Prompt!;
+		Check.True(
+			continuationMessage.Contains(continuationPrompt, StringComparison.Ordinal)
+			&& continuationMessage.Contains(workOrder.Replace("\\", "\\\\"), StringComparison.Ordinal)
+			&& workspace.Store.Load(chat.SessionId!).Prompts.Contains(continuationPrompt),
+			"Submit and persist one continuation prompt with its attachments.");
 
 		provider.Replies.Enqueue(new LocalProvider.Reply(
 			"",

@@ -102,9 +102,11 @@ try {
 		ConvertFrom-Json
 	if (
 		$capabilities.supportsExternalAssistantMessages -ne $true -or
-		$capabilities.externalAssistantMessageContractVersion -cne "1.0"
+		$capabilities.externalAssistantMessageContractVersion -cne "1.0" -or
+		$capabilities.supportsSessionContinuation -ne $true -or
+		-not ($capabilities.controlActions -ccontains "continue")
 	) {
-		throw "Published output does not advertise external assistant messages."
+		throw "Published output does not advertise assistant relay and session continuation."
 	}
 
 	$destinationParent = Split-Path -Parent $Destination

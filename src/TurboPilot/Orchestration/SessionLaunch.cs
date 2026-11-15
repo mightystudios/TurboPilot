@@ -12,4 +12,13 @@ internal static class SessionLaunch
 			request.InitialPrompt,
 			request.Attachments.Count == 0 ? null : request.Attachments,
 			cancellationToken);
+
+	internal static Task SubmitContinuationAsync(
+		ChatService chat,
+		SessionControlCommand command,
+		CancellationToken cancellationToken = default) =>
+		chat.SendAsync(
+			command.Prompt ?? "",
+			command.Attachments.Count == 0 ? null : command.Attachments,
+			cancellationToken);
 }

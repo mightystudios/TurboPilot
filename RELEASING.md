@@ -50,9 +50,10 @@ The publish folder must contain at least:
 - `session-launch-capabilities.json`
 - `runtimes\win-x64\native\copilot.exe`
 
-The capability marker must advertise `supportsExternalAssistantMessages: true`.
+The capability marker must advertise `supportsExternalAssistantMessages: true`
+and `supportsSessionContinuation: true`, with `continue` in `controlActions`.
 This prevents phase tooling from launching a stale executable that cannot
-present durable progress reports.
+present durable progress reports or continue an idle incomplete executor.
 
 For a validated local deployment, run:
 

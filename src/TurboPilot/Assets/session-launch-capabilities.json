@@ -7,10 +7,14 @@
   "supportsSessionControl": true,
   "controlTransport": "json-file",
   "controlContractVersion": "1.0",
+  "supportsSessionContinuation": true,
+  "continuationPromptMaxCharacters": 32768,
+  "continuationAttachmentLimit": 32,
   "supportsExternalAssistantMessages": true,
   "externalAssistantMessageTransport": "json-file",
   "externalAssistantMessageContractVersion": "1.0",
   "controlActions": [
+    "continue",
     "replace",
     "close"
   ],
