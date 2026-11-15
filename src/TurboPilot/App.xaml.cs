@@ -1,4 +1,6 @@
 using System.Windows;
+using System.Windows.Controls;
+using System.Windows.Controls.Primitives;
 using TurboPilot.Customizations;
 using TurboPilot.Orchestration;
 using Theme = TurbolandTheme.Wpf.TurbolandTheme;
@@ -13,6 +15,7 @@ public partial class App : System.Windows.Application
 
 		CustomizationService.ConfigureProcessEnvironment();
 		Theme.Apply(this, TurbolandTheme.Core.ThemeMode.Authentic);
+		DisableAutomaticWordSelection(this);
 
 		string? launchRequestPath;
 		try
@@ -70,6 +73,28 @@ public partial class App : System.Windows.Application
 		var window = new MainWindow();
 		Theme.ApplyTo(window);
 		return window;
+	}
+
+	internal static void DisableAutomaticWordSelection(Application application)
+	{
+		DisableFor(typeof(TextBox));
+		DisableFor(typeof(RichTextBox));
+
+		void DisableFor(Type targetType)
+		{
+			if (application.Resources.Contains(targetType)
+				&& application.Resources[targetType] is Style configured
+				&& configured.Setters.OfType<Setter>().Any(setter =>
+					setter.Property == TextBoxBase.AutoWordSelectionProperty
+					&& setter.Value is false))
+			{
+				return;
+			}
+
+			var style = new Style(targetType, application.TryFindResource(targetType) as Style);
+			style.Setters.Add(new Setter(TextBoxBase.AutoWordSelectionProperty, false));
+			application.Resources[targetType] = style;
+		}
 	}
 
 	private void FailStartup(Exception exception)

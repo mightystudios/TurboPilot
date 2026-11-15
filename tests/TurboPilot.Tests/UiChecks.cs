@@ -68,6 +68,7 @@ internal static class UiChecks
 				using var workspace = new TestWorkspace();
 				await using var provider = new LocalProvider();
 				TurbolandTheme.Wpf.TurbolandTheme.Apply(application, TurbolandTheme.Core.ThemeMode.Authentic);
+				App.DisableAutomaticWordSelection(application);
 				var window = new MainWindow(workspace.Store, workspace.CreateChat, _ => new(),
 					Path.Combine(workspace.Root, "browser"));
 				TurbolandTheme.Wpf.TurbolandTheme.ApplyTo(window);
@@ -530,6 +531,16 @@ internal static class UiChecks
 		Console.WriteLine("PASS Raw and Rendered output share a four-page sliding window");
 	}
 
+	private static void CheckAutomaticWordSelectionDisabled(MainWindow window)
+	{
+		Check.True(!new TextBox().AutoWordSelection,
+			"TextBox controls must not select whole words automatically.");
+		Check.True(!Control<RichTextBox>(window, "richTextBoxOutput").AutoWordSelection
+			&& !Control<RichTextBox>(window, "richTextBoxInput").AutoWordSelection,
+			"Raw output and prompt editors must not select whole words automatically.");
+		Console.WriteLine("PASS automatic whole-word selection disabled for text editors");
+	}
+
 	private static async Task CheckRenderedUserPromptStyleAsync(MainWindow window, WebView2 webView)
 	{
 		window.ClearOutput();
@@ -647,6 +658,7 @@ internal static class UiChecks
 		var library = workspace.CreateLibrary();
 		var externalStarts = new List<System.Diagnostics.ProcessStartInfo>();
 		TurbolandTheme.Wpf.TurbolandTheme.Apply(application, TurbolandTheme.Core.ThemeMode.Authentic);
+		App.DisableAutomaticWordSelection(application);
 		var options = new ChatSessionOptions
 		{
 			WorkspaceFolder = workspace.Workspace,
@@ -672,6 +684,7 @@ internal static class UiChecks
 			Check.Equal("Start or resume a session to begin.", Status(window), "Initial status");
 			window.Show();
 			await Check.UntilAsync(() => Field<bool>(window, "_webViewReady"), "The rendered output did not initialize.");
+			CheckAutomaticWordSelectionDisabled(window);
 			var outputTabs = Control<TabControl>(window, "outputTabs");
 			Check.True(window.OutputText.Contains("# Welcome to TurboPilot", StringComparison.Ordinal)
 				&& window.OutputText.Contains("Help > Show Help", StringComparison.Ordinal),
