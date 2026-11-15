@@ -877,6 +877,47 @@ internal static class UiChecks
 					$"Saved paging turn {page} did not complete.");
 			}
 
+			const string presentScrollSentinel = "present-scroll-line-199";
+			chat.AddNotice("\r\n" + string.Join("\r\n",
+				Enumerable.Range(0, 200).Select(index => $"present-scroll-line-{index:D3}")) + "\r\n");
+			await Check.UntilAsync(() => window.OutputText.Contains(presentScrollSentinel),
+				"The long present output did not reach the window.");
+			var outputPrevious = Control<Button>(window, "buttonOutputPagePrev");
+			var outputNext = Control<Button>(window, "buttonOutputPageNext");
+			Check.True(outputPrevious.IsEnabled,
+				"The live session must have enough pages to revisit older output.");
+			while (outputPrevious.IsEnabled)
+				Click(window, "buttonOutputPagePrev");
+			Check.True(outputNext.IsEnabled,
+				"Browsing old output must leave the present output reachable.");
+
+			const string returnToPresentPrompt = "return output to the present";
+			var presentReply = new LocalProvider.Reply("Present output reply.", Hold: true);
+			provider.Replies.Enqueue(presentReply);
+			try
+			{
+				SetInput(window, returnToPresentPrompt);
+				Click(window, "buttonSend");
+				await presentReply.Started.Task.WaitAsync(TimeSpan.FromSeconds(15));
+				Check.True(!outputNext.IsEnabled,
+					"Submitting a prompt must select the newest output page window.");
+				await CheckTranscriptOpenedAtEndAsync(
+					window,
+					webView,
+					"Submitting a prompt while browsing old output",
+					returnToPresentPrompt);
+			}
+			finally
+			{
+				presentReply.Release.TrySetResult();
+			}
+			await Check.UntilAsync(
+				() => Status(window).StartsWith("Ready..")
+					&& window.OutputText.Contains("Present output reply."),
+				"The present output turn did not complete.");
+			Console.WriteLine(
+				"PASS prompt submission returns Raw and Rendered output to the newest page and bottom");
+
 			var attachments = Field<List<string>>(window, "_attachments");
 			attachments.Add(Path.Combine(workspace.Workspace, "missing.txt"));
 			Invoke(window, "UpdateAttachmentButton");

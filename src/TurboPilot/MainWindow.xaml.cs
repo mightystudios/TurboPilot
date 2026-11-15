@@ -859,6 +859,12 @@ public partial class MainWindow : TurbolandWindow
 			IsNewestOutputPageWindow ? TranscriptPosition.End : TranscriptPosition.Top);
 	}
 
+	private void ReturnOutputToPresent()
+	{
+		_outputPageWindowStart = NewestOutputPageWindowStart;
+		MaterializeOutputPageWindow(TranscriptPosition.End);
+	}
+
 	private void ButtonOutputPagePrev_Click(object sender, RoutedEventArgs e) =>
 		SelectOutputPageWindow(_outputPageWindowStart - 1);
 
@@ -2353,6 +2359,7 @@ public partial class MainWindow : TurbolandWindow
 			return;
 		}
 
+		ReturnOutputToPresent();
 		var attachments = resolution.Attachments.ToArray();
 		var directAttachments = _attachments.ToArray();
 		richTextBoxInput.Document.Blocks.Clear();
