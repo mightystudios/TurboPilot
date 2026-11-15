@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 from contextlib import contextmanager
 from datetime import datetime, timezone
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -41,6 +42,8 @@ PHASE_STATES = {
 }
 CONTROL_DISPOSITIONS = {"abandon", "summarize_and_store"}
 REPLACEMENT_READY_STATES = {"connecting", "running", "waiting_user", "idle"}
+MAXIMUM_CONTINUATION_PROMPT_CHARACTERS = 32 * 1024
+MAXIMUM_CONTINUATION_ATTACHMENTS = 32
 _PROCESS_LOCK = threading.Lock()
 
 
@@ -79,7 +82,6 @@ def start_orchestration(
             _validate_existing_run(
                 state,
                 manifest_file,
-                executable,
                 selected_mode,
                 roadmap_id,
             )
@@ -88,6 +90,24 @@ def start_orchestration(
             active_result_exists = bool(state["activeResultPath"]) and Path(
                 state["activeResultPath"]
             ).is_file()
+            recorded_executable = Path(state["executablePath"]).resolve()
+            if recorded_executable != executable:
+                if (
+                    process_alive
+                    or state["phaseState"] != "closed"
+                    or active_result_exists
+                    or state["pendingReplacement"] is not None
+                ):
+                    raise RunnerError(
+                        "run directory belongs to a different TurboPilot executable"
+                    )
+                state["executablePath"] = str(executable)
+                state["progress"] = _progress(
+                    None,
+                    "Migrating the closed incomplete run to a replacement executable.",
+                )
+                state["updatedAt"] = _utc_now()
+                atomic_write_json(state_path, state)
             if (
                 process_alive
                 or state["phaseState"] == "completed"
@@ -213,6 +233,138 @@ def complete_phase(
         return destination
 
 
+def continue_phase(
+    state_path: str | Path,
+    instructions: str,
+    timeout: float = 30.0,
+    poll_seconds: float = 0.25,
+    attachments: Sequence[str | Path] = (),
+    *,
+    process_checker: Callable[[int], bool] | None = None,
+    sleeper: Callable[[float], None] = time.sleep,
+) -> dict[str, Any]:
+    if timeout < 0:
+        raise RunnerError("timeout must be zero or greater")
+    if poll_seconds <= 0:
+        raise RunnerError("poll-seconds must be greater than zero")
+    prompt = _nonempty(instructions, "instructions")
+    if len(prompt) > MAXIMUM_CONTINUATION_PROMPT_CHARACTERS:
+        raise RunnerError(
+            "instructions exceed the continuation prompt character limit"
+        )
+    if len(attachments) > MAXIMUM_CONTINUATION_ATTACHMENTS:
+        raise RunnerError(
+            "attachments exceed the continuation attachment limit"
+        )
+
+    state_file = Path(state_path).resolve()
+    checker = process_checker or _process_is_alive
+    with _exclusive_lock(state_file.parent):
+        state = _load_state(state_file)
+        if state["pendingReplacement"] is not None:
+            raise RunnerError("cannot continue while a session replacement is pending")
+        if state["phaseState"] not in {"starting", "running"}:
+            raise RunnerError(
+                f"cannot continue while phaseState is {state['phaseState']!r}"
+            )
+        process_id = _positive_int_or_none(state.get("processId"))
+        if process_id is None or not checker(process_id):
+            raise RunnerError("cannot continue because the executor process is not running")
+
+        request = _load_object(Path(state["activeRequestPath"]), "active launch request")
+        session_status = _load_active_session_status(state)
+        if session_status is None:
+            raise RunnerError("cannot continue before TurboPilot writes session status")
+        if session_status["processId"] != process_id:
+            raise RunnerError("active session status belongs to another process")
+        if (
+            session_status["state"] != "idle"
+            or session_status["isWorking"]
+            or session_status["hasPendingQuestion"]
+        ):
+            raise RunnerError("session continuation requires an idle executor session")
+        session_id = _required_string(
+            session_status,
+            "sessionId",
+            "active session status",
+        )
+
+        workspace = Path(_required_string(request, "workspace", "active launch request"))
+        canonical_attachments = []
+        for value in attachments:
+            path = Path(value).resolve()
+            if not path.is_file():
+                raise RunnerError(f"continuation attachment does not exist: {path}")
+            try:
+                path.relative_to(workspace)
+            except ValueError as error:
+                raise RunnerError(
+                    f"continuation attachment must be contained by workspace: {path}"
+                ) from error
+            canonical_attachments.append(str(path))
+
+        fingerprint = "\0".join(
+            [
+                state["activeLaunchId"],
+                session_id,
+                prompt,
+                *canonical_attachments,
+            ]
+        )
+        command_id = "continue-" + hashlib.sha256(
+            fingerprint.encode("utf-8")
+        ).hexdigest()[:32]
+        command = {
+            "contractVersion": SCHEMA_VERSION,
+            "commandId": command_id,
+            "targetProcessId": process_id,
+            "targetLaunchId": state["activeLaunchId"],
+            "targetSessionId": session_id,
+            "action": "continue",
+            "disposition": "abandon",
+            "prompt": prompt,
+            "attachments": canonical_attachments,
+        }
+        control_path = Path(state["controlPath"])
+        existing = _load_optional_object(control_path, "session control")
+        if existing != command:
+            atomic_write_json(control_path, command)
+        state["progress"] = _progress(
+            None,
+            "Continuation prompt issued to the active phase executor.",
+        )
+        state["updatedAt"] = _utc_now()
+        atomic_write_json(state_file, state)
+
+        deadline = time.monotonic() + timeout
+        while True:
+            current = _load_active_session_status(state)
+            command_state = (
+                current.get("lastControlCommandState")
+                if current is not None
+                and current.get("lastControlCommandId") == command_id
+                else None
+            )
+            if command_state == "failed":
+                raise RunnerError(
+                    str(
+                        current.get("lastControlCommandError")
+                        or "TurboPilot rejected the continuation command"
+                    )
+                )
+            if command_state in {"received", "completed"}:
+                response = _state_response(state_file, state)
+                response["continuationCommandId"] = command_id
+                response["continuationState"] = command_state
+                return response
+            if time.monotonic() >= deadline:
+                response = _state_response(state_file, state)
+                response["continuationCommandId"] = command_id
+                response["continuationState"] = "pending"
+                return response
+            sleeper(poll_seconds)
+
+
 def rework_phase(
     state_path: str | Path,
     review_instructions: str,
@@ -231,6 +383,145 @@ def rework_phase(
         sleeper=sleeper,
         review_instructions=instructions,
     )
+
+
+def rewind_phase(
+    state_path: str | Path,
+    target_phase_id: str,
+    review_instructions: str,
+    timeout: float = 30.0,
+    poll_seconds: float = 0.25,
+    *,
+    process_checker: Callable[[int], bool] | None = None,
+    sleeper: Callable[[float], None] = time.sleep,
+) -> dict[str, Any]:
+    if timeout < 0:
+        raise RunnerError("timeout must be zero or greater")
+    if poll_seconds <= 0:
+        raise RunnerError("poll-seconds must be greater than zero")
+    if not _is_phase_id(target_phase_id):
+        raise RunnerError("target phase must contain at least two digits")
+    instructions = _nonempty(review_instructions, "review instructions")
+    state_file = Path(state_path).resolve()
+    checker = process_checker or _process_is_alive
+
+    with _exclusive_lock(state_file.parent):
+        state = _load_state(state_file)
+        if state["pendingReplacement"] is not None:
+            process_id = _positive_int_or_none(state.get("processId"))
+            if process_id is None or not checker(process_id):
+                state = _recover_pending_replacement(state_file, state)
+                return _state_response(state_file, state)
+            _ensure_pending_control(state)
+            state = _wait_for_replacement(
+                state_file,
+                state,
+                timeout,
+                poll_seconds,
+                sleeper,
+            )
+            return _state_response(state_file, state)
+        if state["phaseState"] != "completed":
+            raise RunnerError("rewind requires a completed active phase")
+        process_id = _positive_int_or_none(state.get("processId"))
+        if process_id is None or not checker(process_id):
+            raise RunnerError("rewind requires a live TurboPilot process")
+
+        manifest_path = Path(state["manifestPath"]).resolve()
+        manifest = _load_object(manifest_path, "phase manifest")
+        _validate_manifest(manifest)
+        phases = _ordered_phases(manifest)
+        phase_ids = [
+            _required_string(phase, "phaseId", "phase manifest")
+            for phase in phases
+        ]
+        if target_phase_id not in phase_ids:
+            raise RunnerError(f"target phase {target_phase_id!r} is not in the manifest")
+        current_phase_id = state["activePhaseId"]
+        current_index = phase_ids.index(current_phase_id)
+        target_index = phase_ids.index(target_phase_id)
+        if target_index >= current_index:
+            raise RunnerError("rewind target must precede the active phase")
+        if (
+            target_index > 0
+            and phase_ids[target_index - 1] not in state["completedPhases"]
+        ):
+            raise RunnerError("rewind target predecessor is not completed")
+
+        rewind_id = f"rewind-{target_phase_id}-{uuid4().hex}"
+        archive_directory = (
+            Path(state["runDirectory"])
+            / "results"
+            / "superseded"
+            / rewind_id
+        )
+        archive_directory.mkdir(parents=True, exist_ok=False)
+        for phase_id in phase_ids[target_index : current_index + 1]:
+            result_path = (
+                Path(state["runDirectory"])
+                / "results"
+                / f"phase-{phase_id}.json"
+            )
+            if not result_path.is_file():
+                continue
+            result = _load_object(result_path, f"phase {phase_id} result")
+            _validate_result(result, require_completed_at=True)
+            if (
+                result["roadmapId"] != state["roadmapId"]
+                or result["phaseId"] != phase_id
+            ):
+                raise RunnerError(f"phase {phase_id} result identity is invalid")
+            result_path.replace(archive_directory / result_path.name)
+
+        state["completedPhases"] = [
+            phase_id
+            for phase_id in state["completedPhases"]
+            if phase_ids.index(phase_id) < target_index
+        ]
+        launch = _create_launch(
+            manifest=manifest,
+            manifest_path=manifest_path,
+            state_path=state_file,
+            state=state,
+            phase_id=target_phase_id,
+        )
+        _append_rewind_instructions(
+            launch,
+            current_phase_id,
+            target_phase_id,
+            instructions,
+            archive_directory,
+        )
+        pending = {
+            "commandId": f"rewind-{target_phase_id}-{uuid4().hex}",
+            "targetProcessId": process_id,
+            "targetLaunchId": state["activeLaunchId"],
+            "fromPhaseId": target_phase_id,
+            "toPhaseId": target_phase_id,
+            "nextLaunchId": launch["launchId"],
+            "requestPath": launch["requestPath"],
+            "sessionStatusPath": launch["sessionStatusPath"],
+            "resultPath": launch["resultPath"],
+            "issuedAt": _utc_now(),
+        }
+        state["pendingReplacement"] = pending
+        state["phaseState"] = "replacing"
+        state["progress"] = _progress(
+            None,
+            f"Rewinding Phase {current_phase_id} to corrective Phase "
+            f"{target_phase_id}.",
+        )
+        state["updatedAt"] = _utc_now()
+        atomic_write_json(state_file, state)
+        _ensure_pending_control(state)
+        state = _wait_for_replacement(
+            state_file,
+            state,
+            timeout,
+            poll_seconds,
+            sleeper,
+        )
+        return _state_response(state_file, state)
 
 
 def advance_phase(
@@ -633,6 +924,28 @@ def _append_rework_instructions(launch: Mapping[str, str], instructions: str) ->
     atomic_write_json(request_path, request)
 
 
+def _append_rewind_instructions(
+    launch: Mapping[str, str],
+    from_phase_id: str,
+    target_phase_id: str,
+    instructions: str,
+    archive_directory: Path,
+) -> None:
+    request_path = Path(launch["requestPath"])
+    request = _load_object(request_path, "rewind launch request")
+    request["initialPrompt"] = (
+        f"{request['initialPrompt']}\n\nThis is an authorized roadmap rewind from "
+        f"Phase {from_phase_id} to Phase {target_phase_id}. Prior Phase "
+        f"{target_phase_id}-{from_phase_id} results are superseded and archived "
+        f"under \"{archive_directory}\". Implement the corrective instructions "
+        "below before re-running every phase acceptance criterion. Preserve "
+        "accepted predecessor outputs and do not restore superseded artifacts.\n\n"
+        f"Corrective instructions:\n{instructions}"
+    )
+    _validate_launch_request(request)
+    atomic_write_json(request_path, request)
+
+
 def _archive_phase_result(state: Mapping[str, Any], result: Mapping[str, Any]) -> Path:
     phase_id = _required_string(state, "activePhaseId", "orchestration state")
     archive_path = (
@@ -920,14 +1233,11 @@ def _classify(
 def _validate_existing_run(
     state: Mapping[str, Any],
     manifest_path: Path,
-    executable_path: Path,
     mode: str,
     roadmap_id: str,
 ) -> None:
     if Path(state["manifestPath"]).resolve() != manifest_path:
         raise RunnerError("run directory belongs to a different manifest")
-    if Path(state["executablePath"]).resolve() != executable_path:
-        raise RunnerError("run directory belongs to a different TurboPilot executable")
     if state["mode"] != mode:
         raise RunnerError("run directory belongs to a different TurboPilot mode")
     if state["roadmapId"] != roadmap_id:
@@ -948,6 +1258,9 @@ def _validate_capabilities(executable: Path) -> None:
         "supportsSessionControl": True,
         "controlTransport": "json-file",
         "controlContractVersion": SCHEMA_VERSION,
+        "supportsSessionContinuation": True,
+        "continuationPromptMaxCharacters": MAXIMUM_CONTINUATION_PROMPT_CHARACTERS,
+        "continuationAttachmentLimit": MAXIMUM_CONTINUATION_ATTACHMENTS,
         "supportsExternalAssistantMessages": True,
         "externalAssistantMessageTransport": "json-file",
         "externalAssistantMessageContractVersion": SCHEMA_VERSION,
@@ -957,7 +1270,11 @@ def _validate_capabilities(executable: Path) -> None:
             raise RunnerError(
                 f"TurboPilot capability {key} must be {expected!r}"
             )
-    _require_capability_values(marker, "controlActions", {"replace", "close"})
+    _require_capability_values(
+        marker,
+        "controlActions",
+        {"continue", "replace", "close"},
+    )
     _require_capability_values(
         marker,
         "controlDispositions",
@@ -1639,6 +1956,26 @@ def _build_parser() -> argparse.ArgumentParser:
     rework.add_argument("--timeout", type=float, default=30.0)
     rework.add_argument("--poll-seconds", type=float, default=0.25)
 
+    rewind = commands.add_parser(
+        "rewind",
+        help="Archive superseded results and replace the active session with an earlier phase.",
+    )
+    rewind.add_argument("--state", required=True)
+    rewind.add_argument("--phase", required=True)
+    rewind.add_argument("--instructions", required=True)
+    rewind.add_argument("--timeout", type=float, default=30.0)
+    rewind.add_argument("--poll-seconds", type=float, default=0.25)
+
+    continuation = commands.add_parser(
+        "continue",
+        help="Submit a new user turn to the idle active phase session.",
+    )
+    continuation.add_argument("--state", required=True)
+    continuation.add_argument("--instructions", required=True)
+    continuation.add_argument("--attachment", action="append", default=[])
+    continuation.add_argument("--timeout", type=float, default=30.0)
+    continuation.add_argument("--poll-seconds", type=float, default=0.25)
+
     close = commands.add_parser(
         "close",
         help="Close the managed TurboPilot executor process.",
@@ -1688,6 +2025,22 @@ def main(argv: Sequence[str] | None = None) -> int:
                 arguments.instructions,
                 arguments.timeout,
                 arguments.poll_seconds,
+            )
+        elif arguments.command == "rewind":
+            value = rewind_phase(
+                arguments.state,
+                arguments.phase,
+                arguments.instructions,
+                arguments.timeout,
+                arguments.poll_seconds,
+            )
+        elif arguments.command == "continue":
+            value = continue_phase(
+                arguments.state,
+                arguments.instructions,
+                arguments.timeout,
+                arguments.poll_seconds,
+                arguments.attachment,
             )
         elif arguments.command == "close":
             value = close_orchestration(

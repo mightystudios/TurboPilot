@@ -49,7 +49,7 @@ TurboPilot must support:
 
 - `--launch-request`
 - JSON request, status, and control files
-- `replace` and `close` control actions
+- `continue`, `replace`, and `close` control actions
 - `abandon` and `summarize_and_store` dispositions
 - a session-scoped external assistant message host that acknowledges only after
   presenting the message in the active conversation.
@@ -93,6 +93,17 @@ Inspect the active phase:
 python "$env:TURBOPILOT_SESSION_TOOLS\src\TurboPilotPhaseRunner\phase-runner.py" status --state "C:\work\plans\.mighty-ai-runs\roadmap-id\orchestration-state.json"
 ```
 
+When an incomplete executor is idle and needs focused correction without losing
+its current context, submit another user turn to the same session:
+
+```powershell
+python "$env:TURBOPILOT_SESSION_TOOLS\src\TurboPilotPhaseRunner\phase-runner.py" continue --state "C:\work\plans\.mighty-ai-runs\roadmap-id\orchestration-state.json" --instructions "<specific corrective work>"
+```
+
+`continue` requires a live idle session, targets its exact session ID, and uses
+a deterministic command ID so retrying the same instruction does not submit it
+twice.
+
 After the executor submits a verified result, review its scope and evidence,
 then replace it with the successor:
 
@@ -112,6 +123,17 @@ that session without advancing the roadmap:
 ```powershell
 python "$env:TURBOPILOT_SESSION_TOOLS\src\TurboPilotPhaseRunner\phase-runner.py" rework --state "C:\work\plans\.mighty-ai-runs\roadmap-id\orchestration-state.json" --instructions "<specific corrective findings>"
 ```
+
+When a later phase proves an earlier accepted phase invalid, archive every
+superseded result and replace the active session with that earlier phase:
+
+```powershell
+python "$env:TURBOPILOT_SESSION_TOOLS\src\TurboPilotPhaseRunner\phase-runner.py" rewind --state "C:\work\plans\.mighty-ai-runs\roadmap-id\orchestration-state.json" --phase 06 --instructions "<authorized corrective requirements>"
+```
+
+`rewind` preserves predecessor completion, archives all results from the target
+through the active phase, and starts a fresh target-phase context in the same
+managed process.
 
 ## Executor Commands
 
@@ -136,6 +158,8 @@ The orchestrator alone advances the roadmap.
 - A filesystem lock serializes runner commands.
 - Repeating `start` for a live or completed phase reuses existing state and does
   not create another process.
+- A closed incomplete phase may migrate to a capability-compatible replacement
+  executable; live and completed runs reject executable changes.
 - `advance` writes one targeted TurboPilot `replace` command and reuses the
   recorded process ID.
 - `rework` archives the rejected result and writes one targeted TurboPilot
@@ -155,7 +179,7 @@ The orchestrator alone advances the roadmap.
 | `orchestration-state.json` | Phase runner | Active phase, process, progress, and transition state |
 | `launch-request.json` | Phase runner | Native TurboPilot request for one fresh phase session |
 | `session-status.json` | TurboPilot | Session lifecycle, heartbeat, and control acknowledgement |
-| `session-control.json` | Phase runner | Single targeted `replace` or `close` command |
+| `session-control.json` | Phase runner | Single targeted `continue`, `replace`, or `close` command |
 | `phase-XX.json` | Phase runner | Durable acceptance and validation evidence |
 
 ## Tests

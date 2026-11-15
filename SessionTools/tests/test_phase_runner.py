@@ -19,7 +19,9 @@ from mighty_ai_tools.phase_runner import (
     advance_phase,
     close_orchestration,
     complete_phase,
+    continue_phase,
     inspect_orchestration,
+    rewind_phase,
     rework_phase,
     start_orchestration,
     update_progress,
@@ -79,10 +81,13 @@ def write_capabilities(root: Path, **overrides: object) -> Path:
         "supportsSessionControl": True,
         "controlTransport": "json-file",
         "controlContractVersion": "1.0",
+        "supportsSessionContinuation": True,
+        "continuationPromptMaxCharacters": 32768,
+        "continuationAttachmentLimit": 32,
         "supportsExternalAssistantMessages": True,
         "externalAssistantMessageTransport": "json-file",
         "externalAssistantMessageContractVersion": "1.0",
-        "controlActions": ["replace", "close"],
+        "controlActions": ["continue", "replace", "close"],
         "controlDispositions": ["abandon", "summarize_and_store"],
         "sessionStates": [
             "starting",
@@ -301,6 +306,12 @@ class PhaseRunnerTests(unittest.TestCase):
         with self.assertRaisesRegex(RunnerError, "supportsExternalAssistantMessages"):
             self.start()
 
+    def test_start_rejects_missing_session_continuation_capability(self) -> None:
+        write_capabilities(self.root, controlActions=["replace", "close"])
+
+        with self.assertRaisesRegex(RunnerError, "continue"):
+            self.start()
+
     def test_progress_and_completion_use_single_state(self) -> None:
         response = self.start()
 
@@ -318,6 +329,93 @@ class PhaseRunnerTests(unittest.TestCase):
         result = json.loads(result_path.read_text(encoding="ascii"))
         self.assertIn("completedAt", result)
         self.assertEqual(result["phaseId"], "01")
+
+    def test_continue_writes_idempotent_user_turn_and_waits_for_receipt(self) -> None:
+        response = self.start()
+        state = state_from(response)
+        request_path = Path(state["activeRequestPath"])
+        attachment = self.root / "continuation.md"
+        attachment.write_text("continuation evidence", encoding="utf-8")
+        write_session_status(request_path, state="idle")
+
+        acknowledged = False
+
+        def acknowledge(_: float) -> None:
+            nonlocal acknowledged
+            if acknowledged:
+                return
+            acknowledged = True
+            control = json.loads(
+                Path(state["controlPath"]).read_text(encoding="ascii")
+            )
+            write_session_status(
+                request_path,
+                state="running",
+                command_id=control["commandId"],
+                command_state="received",
+            )
+
+        continued = continue_phase(
+            response["statePath"],
+            "Repair the five narrowing conversions.",
+            timeout=1,
+            poll_seconds=0.01,
+            attachments=[attachment],
+            process_checker=lambda process_id: True,
+            sleeper=acknowledge,
+        )
+        control = json.loads(
+            Path(state["controlPath"]).read_text(encoding="ascii")
+        )
+
+        self.assertEqual(control["action"], "continue")
+        self.assertEqual(control["targetProcessId"], 4321)
+        self.assertEqual(control["targetLaunchId"], state["activeLaunchId"])
+        self.assertEqual(control["targetSessionId"], "test-session")
+        self.assertEqual(control["prompt"], "Repair the five narrowing conversions.")
+        self.assertEqual(control["attachments"], [str(attachment.resolve())])
+        self.assertEqual(continued["continuationState"], "received")
+
+        write_session_status(
+            request_path,
+            state="idle",
+            command_id=control["commandId"],
+            command_state="completed",
+        )
+        repeated = continue_phase(
+            response["statePath"],
+            "Repair the five narrowing conversions.",
+            timeout=0,
+            attachments=[attachment],
+            process_checker=lambda process_id: True,
+        )
+        repeated_control = json.loads(
+            Path(state["controlPath"]).read_text(encoding="ascii")
+        )
+        self.assertEqual(repeated["continuationCommandId"], control["commandId"])
+        self.assertEqual(repeated["continuationState"], "completed")
+        self.assertEqual(repeated_control, control)
+
+    def test_continue_requires_live_idle_matching_session(self) -> None:
+        response = self.start()
+        state = state_from(response)
+        request_path = Path(state["activeRequestPath"])
+        write_session_status(request_path, state="running")
+
+        with self.assertRaisesRegex(RunnerError, "idle"):
+            continue_phase(
+                response["statePath"],
+                "Do not queue this turn.",
+                process_checker=lambda process_id: True,
+            )
+
+        write_session_status(request_path, state="idle")
+        with self.assertRaisesRegex(RunnerError, "not running"):
+            continue_phase(
+                response["statePath"],
+                "Do not send to a dead process.",
+                process_checker=lambda process_id: False,
+            )
 
     def test_repeated_completion_is_idempotent(self) -> None:
         response = self.start()
@@ -396,6 +494,66 @@ class PhaseRunnerTests(unittest.TestCase):
             request["initialPrompt"],
         )
         launch.assert_not_called()
+
+    def test_rewind_archives_results_and_replaces_with_earlier_phase(self) -> None:
+        response = self.start()
+        self.complete(response)
+        advance_phase(
+            response["statePath"],
+            timeout=0,
+            process_checker=lambda process_id: True,
+        )
+        state = state_from(response)
+        write_session_status(
+            Path(state["pendingReplacement"]["requestPath"]),
+            state="running",
+        )
+        inspect_orchestration(
+            response["statePath"],
+            process_checker=lambda process_id: True,
+        )
+        self.complete(response, phase_id="02")
+
+        rewinding = rewind_phase(
+            response["statePath"],
+            "01",
+            "Remove the unauthorized transition-face limit.",
+            timeout=0,
+            process_checker=lambda process_id: True,
+        )
+        state = state_from(response)
+        pending = state["pendingReplacement"]
+        request = json.loads(Path(pending["requestPath"]).read_text(encoding="ascii"))
+        archives = list(
+            (
+                self.root
+                / ".mighty-ai-runs"
+                / "runner-roadmap"
+                / "results"
+                / "superseded"
+            ).glob("rewind-01-*")
+        )
+
+        self.assertEqual(rewinding["phaseState"], "replacing")
+        self.assertEqual(pending["fromPhaseId"], "01")
+        self.assertEqual(pending["toPhaseId"], "01")
+        self.assertEqual(state["completedPhases"], [])
+        self.assertEqual(len(archives), 1)
+        self.assertTrue((archives[0] / "phase-01.json").is_file())
+        self.assertTrue((archives[0] / "phase-02.json").is_file())
+        self.assertIn(
+            "Remove the unauthorized transition-face limit.",
+            request["initialPrompt"],
+        )
+        self.assertFalse(
+            (
+                self.root
+                / ".mighty-ai-runs"
+                / "runner-roadmap"
+                / "results"
+                / "phase-01.json"
+            ).exists()
+        )
 
     def test_rework_promotes_same_phase_and_accepts_a_superseding_result(self) -> None:
         response = self.start()
@@ -669,6 +827,52 @@ class PhaseRunnerTests(unittest.TestCase):
         self.assertEqual(restarted["phaseState"], "starting")
         self.assertEqual(restarted["processId"], 8765)
         launch.assert_called_once()
+
+    def test_closed_incomplete_run_migrates_to_replacement_executable(self) -> None:
+        response = self.start()
+        close_orchestration(
+            response["statePath"],
+            process_checker=lambda process_id: True,
+        )
+        inspect_orchestration(
+            response["statePath"],
+            process_checker=lambda process_id: False,
+        )
+        replacement = self.root / "replacement" / "TurboPilot.exe"
+        replacement.parent.mkdir()
+        replacement.write_bytes(b"replacement")
+        write_capabilities(replacement.parent)
+
+        with mock.patch(
+            "mighty_ai_tools.phase_runner._launch_process",
+            return_value=8765,
+        ) as launch:
+            restarted = start_orchestration(
+                self.manifest,
+                replacement,
+                process_checker=lambda process_id: False,
+            )
+
+        state = state_from(response)
+        self.assertEqual(restarted["activePhaseId"], "01")
+        self.assertEqual(restarted["phaseState"], "starting")
+        self.assertEqual(state["executablePath"], str(replacement.resolve()))
+        self.assertEqual(state["processId"], 8765)
+        launch.assert_called_once()
+
+    def test_live_run_rejects_replacement_executable(self) -> None:
+        self.start()
+        replacement = self.root / "replacement" / "TurboPilot.exe"
+        replacement.parent.mkdir()
+        replacement.write_bytes(b"replacement")
+        write_capabilities(replacement.parent)
+
+        with self.assertRaisesRegex(RunnerError, "different TurboPilot executable"):
+            start_orchestration(
+                self.manifest,
+                replacement,
+                process_checker=lambda process_id: True,
+            )
 
     def test_closed_completed_run_advances_in_new_process(self) -> None:
         response = self.start()
