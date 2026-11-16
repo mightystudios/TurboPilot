@@ -71,13 +71,11 @@ public sealed partial class ChatService : IAsyncDisposable
 	private Task _planTail = Task.CompletedTask;
 	private string? _deferredTimeoutMessage;
 	private string? _failureMessage;
+	private bool _sessionIdlePending;
 	private static readonly TimeSpan TurnInterruptDeadline = TimeSpan.FromSeconds(5);
 
-	// Tool calls awaiting their outcome, so the completion can be
-	// written into the row the start opened rather than printed as a
-	// second entry the reader has to pair up by eye. A call that carries
-	// the agent's answer is shown as that answer, and is held only so
-	// its failure can still be reported.
+	// Tool calls stay addressable after completion because attached
+	// shell commands can continue streaming under the same call id.
 	private sealed class ToolRecord(string name, string headline, string body, bool isReply = false)
 	{
 		public string Name { get; } = name;
@@ -85,10 +83,16 @@ public sealed partial class ChatService : IAsyncDisposable
 		public string Body { get; } = body;
 		public bool IsReply { get; } = isReply;
 		public StringBuilder ShellOutput { get; } = new();
+		public StringBuilder FullShellOutput { get; } = new();
+		public StringBuilder LateShellOutput { get; } = new();
 		public SortedDictionary<long, ToolShellChunk> PendingShellOutput { get; } = [];
 		public long NextShellSequence { get; set; }
 		public string? ShellStream { get; set; }
 		public bool ShellOutputTruncated { get; set; }
+		public bool IsCompleted { get; set; }
+		public bool CompletionReported { get; set; }
+		public string CompletionState { get; set; } = "running";
+		public string CompletionOutcome { get; set; } = "";
 	}
 	private sealed record ToolShellChunk(string Stream, string Text);
 	private readonly Dictionary<string, ToolRecord> _toolCalls = [];
@@ -331,6 +335,7 @@ public sealed partial class ChatService : IAsyncDisposable
 				SaveUsage();
 			}
 			AddNotice(NoticeFormatter.Banner($"{(resumeId is null ? "Session" : "Resumed")} {SessionId} | {_options.Model} | {_options.Mode}"));
+			_sessionIdlePending = false;
 			_isWorking = false;
 			TouchActivity();
 			StateChanged?.Invoke();
@@ -433,6 +438,7 @@ public sealed partial class ChatService : IAsyncDisposable
 				_activeSendCancellation = turnCancellation =
 					CancellationTokenSource.CreateLinkedTokenSource(linked.Token);
 				_acceptQuestions = true;
+				_sessionIdlePending = false;
 				_isWorking = true;
 				_turnStarted = Stopwatch.GetTimestamp();
 				_lastActivity = _turnStarted;
@@ -631,6 +637,7 @@ public sealed partial class ChatService : IAsyncDisposable
 	{
 		lock (_sync)
 		{
+			_sessionIdlePending = false;
 			_isWorking = false;
 			_turnStarted = 0;
 			_deferredTimeoutMessage = null;
@@ -841,10 +848,12 @@ public sealed partial class ChatService : IAsyncDisposable
 			_isWorking = false;
 			lock (_sync)
 			{
+				_sessionIdlePending = false;
 				_turnStarted = 0;
 				_warmupStarted = 0;
 				_isWarming = false;
 				_deferredTimeoutMessage = null;
+				SettleToolCalls();
 			}
 			_turnIdle?.TrySetResult();
 		}
@@ -1113,6 +1122,7 @@ public sealed partial class ChatService : IAsyncDisposable
 				switch (evt)
 				{
 					case AssistantTurnStartEvent:
+						_sessionIdlePending = false;
 						_isWorking = true;
 						if (_turnStarted == 0)
 							_turnStarted = Stopwatch.GetTimestamp();
@@ -1122,9 +1132,6 @@ public sealed partial class ChatService : IAsyncDisposable
 						_planMessageId = null;
 						_plan = [];
 						Progress = null;
-						// A tool call that never reported an outcome cannot
-						// get one now, and holding its record would leak.
-						SettleToolCalls();
 						if (_turnIdle is null || _turnIdle.Task.IsCompleted)
 							_turnIdle = new(TaskCreationOptions.RunContinuationsAsynchronously);
 						StateChanged?.Invoke();
@@ -1151,13 +1158,23 @@ public sealed partial class ChatService : IAsyncDisposable
 							QueueFormatting(message.Data.MessageId, display);
 						break;
 					case ToolExecutionStartEvent tool:
+						MarkToolActivity();
 						ShowToolStart(tool.Data);
+						StateChanged?.Invoke();
 						break;
 					case ToolShellOutputEvent output:
-						ShowToolShellOutput(output.Data);
+						if (ShowToolShellOutput(output.Data))
+						{
+							MarkToolActivity();
+							StateChanged?.Invoke();
+						}
 						break;
 					case ToolExecutionCompleteEvent done:
-						ShowToolComplete(done.Data);
+						if (ShowToolComplete(done.Data))
+						{
+							FinishPendingIdle();
+							StateChanged?.Invoke();
+						}
 						break;
 					case SessionTodosChangedEvent:
 						RefreshPlan();
@@ -1180,6 +1197,8 @@ public sealed partial class ChatService : IAsyncDisposable
 						_deferredTimeoutMessage = null;
 						_failureMessage = error.Data.Message;
 						AddNotice(NoticeFormatter.Status("error", error.Data.Message));
+						_sessionIdlePending = false;
+						SettleToolCalls();
 						_isWorking = false;
 						_turnStarted = 0;
 						_turnIdle?.TrySetResult();
@@ -1215,21 +1234,9 @@ public sealed partial class ChatService : IAsyncDisposable
 						UsageChanged?.Invoke();
 						break;
 					case SessionIdleEvent:
-						if (!string.IsNullOrWhiteSpace(_deferredTimeoutMessage))
-							AddNotice(NoticeFormatter.Status("error", _deferredTimeoutMessage));
-						_deferredTimeoutMessage = null;
-						_isWorking = false;
-						_turnStarted = 0;
-						_turnIdle?.TrySetResult();
-						_streamedMessages.Clear();
-						_completedMessages.Clear();
-						_messageBuffers.Clear();
-						SettleToolCalls();
-						ReportChanges();
-						if (_pendingChanges is not null)
-							_ = Task.Run(ApplyPendingChangesAsync);
-						ReleaseQuestions();
-						SaveUsage();
+						_sessionIdlePending = true;
+						FinishPendingIdle();
+						StateChanged?.Invoke();
 						break;
 				}
 			}
@@ -1238,6 +1245,38 @@ public sealed partial class ChatService : IAsyncDisposable
 		{
 			ErrorReceived?.Invoke("Could not process a session event: " + ex.Message);
 		}
+	}
+
+	private void MarkToolActivity()
+	{
+		_sessionIdlePending = false;
+		if (!_isWorking || _turnStarted == 0)
+			_turnStarted = Stopwatch.GetTimestamp();
+		_isWorking = true;
+		if (_turnIdle is null || _turnIdle.Task.IsCompleted)
+			_turnIdle = new(TaskCreationOptions.RunContinuationsAsynchronously);
+	}
+
+	private void FinishPendingIdle()
+	{
+		if (!_sessionIdlePending || _toolCalls.Values.Any(call => !call.IsCompleted))
+			return;
+
+		if (!string.IsNullOrWhiteSpace(_deferredTimeoutMessage))
+			AddNotice(NoticeFormatter.Status("error", _deferredTimeoutMessage));
+		_sessionIdlePending = false;
+		_deferredTimeoutMessage = null;
+		_isWorking = false;
+		_turnStarted = 0;
+		_turnIdle?.TrySetResult();
+		_streamedMessages.Clear();
+		_completedMessages.Clear();
+		_messageBuffers.Clear();
+		ReportChanges();
+		if (_pendingChanges is not null)
+			_ = Task.Run(ApplyPendingChangesAsync);
+		ReleaseQuestions();
+		SaveUsage();
 	}
 
 	/// <summary>
@@ -1374,7 +1413,7 @@ public sealed partial class ChatService : IAsyncDisposable
 	private void ShowToolStart(ToolExecutionStartData data)
 	{
 		var name = string.IsNullOrWhiteSpace(data.ToolName) ? "tool" : data.ToolName;
-		var id = "tool:" + (data.ToolCallId ?? Guid.NewGuid().ToString("N"));
+		var id = ToolId(data.ToolCallId);
 		if (ToolDetail.Reply(name, data.Arguments) is { } reply)
 		{
 			lock (_sync)
@@ -1401,6 +1440,21 @@ public sealed partial class ChatService : IAsyncDisposable
 		}
 	}
 
+	private static string ToolId(string? toolCallId) => "tool:" + (toolCallId ?? string.Empty);
+
+	private ToolRecord GetOrCreateToolCall(string id, string name)
+	{
+		if (_toolCalls.TryGetValue(id, out var call))
+			return call;
+
+		const string headline = "Start details were not received.";
+		call = new ToolRecord(name, headline, string.Empty);
+		_toolCalls[id] = call;
+		var row = NoticeFormatter.Tool(call.Name, call.Headline, call.Body);
+		EmitTranscript("\r\n" + row.Text + "\r\n\r\n", id, "\r\n\r\n" + row.Rendered + "\r\n\r\n");
+		return call;
+	}
+
 	/// <summary>
 	/// Writes an answer the agent handed back through a tool the way a
 	/// reply it wrote is written: plain in the Raw tab, markdown in the
@@ -1417,49 +1471,63 @@ public sealed partial class ChatService : IAsyncDisposable
 	}
 
 	/// <summary>Appends ordered shell output to the running tool row.</summary>
-	private void ShowToolShellOutput(ToolShellOutputData data)
+	private bool ShowToolShellOutput(ToolShellOutputData data)
 	{
-		var id = "tool:" + data.ToolCallId;
+		var id = ToolId(data.ToolCallId);
 		var stream = data.Stream is { } source && !string.IsNullOrWhiteSpace(source.Value)
 			? source.Value
 			: "stdout";
 		lock (_sync)
 		{
-			if (!_toolCalls.TryGetValue(id, out var call) || call.IsReply
-				|| data.Sequence < call.NextShellSequence
+			var call = GetOrCreateToolCall(id, "shell");
+			if (call.IsReply || data.Sequence < call.NextShellSequence
 				|| !call.PendingShellOutput.TryAdd(data.Sequence,
 					new ToolShellChunk(stream, data.Text)))
-				return;
+				return false;
 
-			var changed = false;
+			var appended = new StringBuilder();
 			while (call.PendingShellOutput.TryGetValue(call.NextShellSequence, out var chunk))
 			{
 				call.PendingShellOutput.Remove(call.NextShellSequence);
 				call.NextShellSequence++;
-				changed |= AppendShellOutput(call, chunk);
+				appended.Append(AppendShellOutput(call, chunk));
 			}
-			if (!changed)
-				return;
+			if (appended.Length == 0)
+				return true;
 
-			var row = NoticeFormatter.Tool(call.Name, call.Headline, call.Body,
-				outcome: LiveShellOutput(call));
+			if (call.IsCompleted)
+			{
+				call.LateShellOutput.Append(appended);
+				AppendRawToolResult(appended.ToString());
+			}
+			var row = NoticeFormatter.Tool(
+				call.Name,
+				call.Headline,
+				call.Body,
+				call.IsCompleted ? call.CompletionState : null,
+				call.IsCompleted ? CompletedToolOutcome(call) : LiveShellOutput(call));
 			ReplaceRendered(id, row.Rendered);
+			return true;
 		}
 	}
 
-	private static bool AppendShellOutput(ToolRecord call, ToolShellChunk chunk)
+	private static string AppendShellOutput(ToolRecord call, ToolShellChunk chunk)
 	{
 		if (chunk.Text.Length == 0)
-			return false;
+			return string.Empty;
+		var appended = new StringBuilder();
 		if (!string.Equals(call.ShellStream, chunk.Stream, StringComparison.OrdinalIgnoreCase))
 		{
-			if (call.ShellOutput.Length > 0 && call.ShellOutput[^1] is not ('\r' or '\n'))
-				call.ShellOutput.Append("\r\n");
-			if (call.ShellOutput.Length > 0 || !string.Equals(chunk.Stream, "stdout", StringComparison.OrdinalIgnoreCase))
-				call.ShellOutput.Append('[').Append(chunk.Stream).Append("]\r\n");
+			if (call.FullShellOutput.Length > 0 && call.FullShellOutput[^1] is not ('\r' or '\n'))
+				appended.Append("\r\n");
+			if (call.FullShellOutput.Length > 0
+				|| !string.Equals(chunk.Stream, "stdout", StringComparison.OrdinalIgnoreCase))
+				appended.Append('[').Append(chunk.Stream).Append("]\r\n");
 			call.ShellStream = chunk.Stream;
 		}
-		call.ShellOutput.Append(chunk.Text);
+		appended.Append(chunk.Text);
+		call.FullShellOutput.Append(appended);
+		call.ShellOutput.Append(appended);
 		if (call.ShellOutput.Length > MaxLiveToolOutputChars)
 		{
 			var remove = call.ShellOutput.Length - MaxLiveToolOutputChars;
@@ -1468,11 +1536,21 @@ public sealed partial class ChatService : IAsyncDisposable
 			call.ShellOutput.Remove(0, remove);
 			call.ShellOutputTruncated = true;
 		}
-		return true;
+		return appended.ToString();
 	}
 
 	private static string LiveShellOutput(ToolRecord call) =>
 		(call.ShellOutputTruncated ? LiveToolOutputTruncated : "") + call.ShellOutput.ToString();
+
+	private static string CompletedToolOutcome(ToolRecord call)
+	{
+		if (call.LateShellOutput.Length == 0)
+			return call.CompletionOutcome;
+		if (call.CompletionOutcome.Length == 0)
+			return call.LateShellOutput.ToString();
+		return call.CompletionOutcome.TrimEnd('\r', '\n')
+			+ "\r\n\r\n" + call.LateShellOutput;
+	}
 
 	/// <summary>
 	/// Finishes the row a tool call opened: marks it done or failed and
@@ -1486,14 +1564,17 @@ public sealed partial class ChatService : IAsyncDisposable
 	/// run of rows is folded into, while a separate notice there would
 	/// break the run apart at every failure.
 	/// </summary>
-	private void ShowToolComplete(ToolExecutionCompleteData data)
+	private bool ShowToolComplete(ToolExecutionCompleteData data)
 	{
-		var id = "tool:" + (data.ToolCallId ?? string.Empty);
-		ToolRecord? started;
+		var id = ToolId(data.ToolCallId);
+		ToolRecord started;
 		lock (_sync)
 		{
-			if (!_toolCalls.Remove(id, out started))
-				return;
+			started = GetOrCreateToolCall(id, "tool");
+			if (started.CompletionReported)
+				return false;
+			started.CompletionReported = true;
+			started.IsCompleted = true;
 		}
 
 		var outcome = ToolDetail.Outcome(data.Success, data.Error?.Message, data.Result?.Content);
@@ -1504,38 +1585,47 @@ public sealed partial class ChatService : IAsyncDisposable
 			// repeats it. There is no row to mark, so a refusal is said.
 			if (!data.Success)
 				AddNotice("[tool] " + failure, NoticeFormatter.Status("error", failure).Rendered);
-			return;
+			started.CompletionState = data.Success ? "ok" : "failed";
+			started.CompletionOutcome = outcome;
+			return true;
 		}
 
-		var liveOutput = LiveShellOutput(started);
-		var rawOutcome = data.Success
+		var fullOutput = started.FullShellOutput.ToString();
+		var reportedOutcome = data.Success
 			? data.Result?.Content ?? string.Empty
 			: string.IsNullOrWhiteSpace(data.Error?.Message) ? "Failed." : data.Error!.Message;
+		var rawOutcome = fullOutput.Length == 0
+			? reportedOutcome
+			: reportedOutcome.Length == 0
+				? fullOutput
+				: reportedOutcome.Contains(fullOutput, StringComparison.Ordinal)
+					? reportedOutcome
+					: fullOutput.TrimEnd('\r', '\n') + "\r\n\r\n" + reportedOutcome;
+		var liveOutput = LiveShellOutput(started);
 		if (liveOutput.Length > 0)
 		{
 			if (data.Success && string.IsNullOrEmpty(data.Result?.Content))
-			{
 				outcome = liveOutput;
-				rawOutcome = liveOutput;
-			}
-			else if (!data.Success)
-			{
+			else if (data.Success
+				&& !data.Result!.Content.Contains(fullOutput, StringComparison.Ordinal))
 				outcome = liveOutput.TrimEnd('\r', '\n') + "\r\n\r\n" + outcome;
-				rawOutcome = liveOutput.TrimEnd('\r', '\n') + "\r\n\r\n" + rawOutcome;
-			}
+			else if (!data.Success)
+				outcome = liveOutput.TrimEnd('\r', '\n') + "\r\n\r\n" + outcome;
 		}
+		started.CompletionState = data.Success ? "ok" : "failed";
+		started.CompletionOutcome = outcome;
 		var row = NoticeFormatter.Tool(started.Name, started.Headline, started.Body,
-			data.Success ? "ok" : "failed", outcome);
+			started.CompletionState, outcome);
 		ReplaceRendered(id, row.Rendered);
 		AppendRawToolResult(rawOutcome);
 		if (!data.Success)
 			AppendRaw("\r\n[tool] " + failure + "\r\n\r\n");
+		return true;
 	}
 
 	/// <summary>
-	/// Closes the rows of tool calls that will never report back, so none
-	/// is left looking busy once its turn is over. A stopped turn is the
-	/// usual cause.
+	/// Marks unfinished rows stopped when the runtime itself is stopped.
+	/// Records remain addressable in case a final buffered event arrives.
 	/// </summary>
 	private void SettleToolCalls()
 	{
@@ -1543,17 +1633,22 @@ public sealed partial class ChatService : IAsyncDisposable
 		{
 			foreach (var (id, call) in _toolCalls)
 			{
+				if (call.IsCompleted)
+					continue;
+				call.IsCompleted = true;
+				call.CompletionState = "stopped";
 				if (!call.IsReply)
 				{
 					var outcome = LiveShellOutput(call);
 					if (outcome.Length > 0)
 						outcome = outcome.TrimEnd('\r', '\n') + "\r\n\r\n";
 					outcome += "Stopped before it reported an outcome.";
+					call.CompletionOutcome = outcome;
 					ReplaceRendered(id, NoticeFormatter.Tool(call.Name, call.Headline, call.Body,
 						"stopped", outcome).Rendered);
+					AppendRawToolResult(call.FullShellOutput.ToString());
 				}
 			}
-			_toolCalls.Clear();
 		}
 	}
 
@@ -2076,6 +2171,7 @@ public sealed partial class ChatService : IAsyncDisposable
 			lock (_sync)
 			{
 				_capture = capture = new StringBuilder();
+				_sessionIdlePending = false;
 				_isWorking = true;
 				_turnStarted = Stopwatch.GetTimestamp();
 				_lastActivity = _turnStarted;
@@ -2161,6 +2257,7 @@ public sealed partial class ChatService : IAsyncDisposable
 	{
 		lock (_sync)
 		{
+			_sessionIdlePending = false;
 			_isWorking = false;
 			_turnStarted = 0;
 			_deferredTimeoutMessage = null;
@@ -2168,6 +2265,7 @@ public sealed partial class ChatService : IAsyncDisposable
 			_streamedMessages.Clear();
 			_completedMessages.Clear();
 			_messageBuffers.Clear();
+			SettleToolCalls();
 		}
 		StateChanged?.Invoke();
 	}

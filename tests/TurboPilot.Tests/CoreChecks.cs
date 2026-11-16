@@ -1535,7 +1535,9 @@ internal static class CoreChecks
 		chat.HandleSessionEvent(SessionEvent.FromJson("""{"type":"tool.execution_start","data":{"toolCallId":"shell-progress","toolName":"shell","arguments":{"command":"build"}}}"""));
 		chat.HandleSessionEvent(SessionEvent.FromJson("""{"type":"session.error","data":{"message":"Shell progress timeout","errorType":"timeout","errorCode":"ETIMEDOUT","statusCode":408}}"""));
 		chat.HandleSessionEvent(SessionEvent.FromJson("""{"type":"tool.shell_output","data":{"toolCallId":"shell-progress","sequence":0,"stream":"stdout","text":"still building"}}"""));
+		chat.HandleSessionEvent(SessionEvent.FromJson("""{"type":"tool.execution_complete","data":{"toolCallId":"shell-progress","success":true,"result":{"content":"build complete"}}}"""));
 		chat.HandleSessionEvent(SessionEvent.FromJson("""{"type":"session.idle","data":{}}"""));
+		Check.True(!chat.IsWorking, "Completed tools must allow the confirmed idle state.");
 		Check.True(!displayed.ToString().Contains("Shell progress timeout"),
 			"Live shell output must count as substantive progress and clear a transient timeout.");
 		chat.HandleSessionEvent(SessionEvent.FromJson("""{"type":"session.mcp_server_status_changed","data":{"serverName":"fixture","status":"failed","error":"Connection refused"}}"""));
@@ -1547,9 +1549,8 @@ internal static class CoreChecks
 	/// <summary>
 	/// Tool calls as the two tabs show them. What matters is that an
 	/// answer handed back through the finishing tool reads as a reply
-	/// rather than as one more shut row, that a failure stays in Raw
-	/// without a notice splitting a run of rows apart in Rendered, and
-	/// that no row still looks busy once its turn is over.
+	/// rather than as one more shut row, failures stay in Raw, and tool
+	/// activity remains visible until its real completion.
 	/// </summary>
 	private static async Task CheckToolRowsAsync()
 	{
@@ -1561,7 +1562,18 @@ internal static class CoreChecks
 		Send("""{"type":"assistant.turn_start","data":{"turnId":"turn-1"}}""");
 		Send("""{"type":"tool.execution_start","data":{"toolCallId":"c1","toolName":"view","arguments":{"path":"missing.md"}}}""");
 		Send("""{"type":"tool.execution_complete","data":{"toolCallId":"c1","success":false,"error":{"message":"Path does not exist"}}}""");
-		Send("""{"type":"tool.execution_start","data":{"toolCallId":"c2","toolName":"rg","arguments":{"pattern":"TODO"}}}""");
+		Send("""{"type":"tool.execution_start","data":{"toolCallId":"c2","toolName":"powershell","arguments":{"command":"download"}}}""");
+		Check.True(chat.IsWorking, "A tool start must put an otherwise idle session into working state.");
+		Send("""{"type":"session.idle","data":{}}""");
+		Check.True(chat.IsWorking && chat.RenderedTranscript.Contains("kp-tool-running"),
+			"Do not accept an idle signal while a tool call is unfinished.");
+		Send("""{"type":"tool.shell_output","data":{"toolCallId":"c2","sequence":0,"stream":"stdout","text":"DOWNLOAD-IN-PROGRESS"}}""");
+		Send("""{"type":"tool.execution_complete","data":{"toolCallId":"c2","success":true,"result":{"content":"download complete"}}}""");
+		Check.True(chat.IsWorking && chat.RenderedTranscript.Contains("DOWNLOAD-IN-PROGRESS"),
+			"Activity after an early idle must require a fresh completion signal.");
+		Send("""{"type":"session.idle","data":{}}""");
+		Check.True(!chat.IsWorking,
+			"The fresh idle after tool completion must return the session to ready.");
 		Send("""{"type":"tool.execution_start","data":{"toolCallId":"c4","toolName":"shell","arguments":{"command":"build"}}}""");
 		Send("""{"type":"tool.shell_output","data":{"toolCallId":"c4","sequence":1,"stream":"stderr","text":"LIVE-ERR-1"}}""");
 		Check.True(!chat.RenderedTranscript.Contains("LIVE-ERR-1"),
@@ -1576,6 +1588,13 @@ internal static class CoreChecks
 		Send("""{"type":"tool.execution_start","data":{"toolCallId":"c3","toolName":"task_complete","arguments":{"summary":"**Finished.** Nothing was left to do."}}}""");
 		Send("""{"type":"tool.execution_complete","data":{"toolCallId":"c3","success":true,"result":{"content":"**Finished.** Nothing was left to do."}}}""");
 		Send("""{"type":"session.idle","data":{}}""");
+		Check.True(!chat.IsWorking, "A fully completed turn must become ready.");
+		Send("""{"type":"tool.shell_output","data":{"toolCallId":"c4","sequence":3,"stream":"stdout","text":"LATE-SHELL-OUTPUT-3"}}""");
+		Check.True(chat.IsWorking && !chat.RenderedTranscript.Contains("LATE-SHELL-OUTPUT-3"),
+			"An out-of-order late shell chunk must restore working state while waiting for its gap.");
+		Send("""{"type":"tool.shell_output","data":{"toolCallId":"c4","sequence":2,"stream":"stdout","text":"LATE-SHELL-OUTPUT-2"}}""");
+		Send("""{"type":"session.idle","data":{}}""");
+		Check.True(!chat.IsWorking, "The later session idle must finish continued shell output.");
 		await chat.WhenRenderedAsync();
 
 		var raw = chat.Transcript;
@@ -1589,12 +1608,19 @@ internal static class CoreChecks
 		Check.Equal(1, rendered.Split("**Finished.** Nothing was left to do.").Length - 1,
 			"Rendered shows the finishing answer once, as markdown, and not its echo");
 		Check.True(!rendered.Contains(">task_complete<"), "The finishing tool is not drawn as a row: " + rendered);
-		Check.True(rendered.Contains("<div class=\"kp-tool kp-tool-stopped\">") && !rendered.Contains("kp-tool-running"),
-			"A call that never reported back is stopped once its turn ends: " + rendered);
+		Check.True(!rendered.Contains("kp-tool-running"),
+			"No completed tool row may remain in working state: " + rendered);
 		Check.Equal(1, rendered.Split("FINAL-SHELL-OUTPUT").Length - 1,
-			"Completion replaces transient shell chunks with one final outcome");
-		Check.True(!rendered.Contains("LIVE-OUT-0") && !rendered.Contains("LIVE-ERR-1"),
-			"Do not duplicate transient shell output after completion.");
+			"Completion shows the final outcome once");
+		Check.True(rendered.Contains("LIVE-OUT-0") && rendered.Contains("LIVE-ERR-1"),
+			"Keep distinct live shell output alongside the final outcome.");
+		Check.True(rendered.Contains("LATE-SHELL-OUTPUT-2")
+			&& rendered.Contains("LATE-SHELL-OUTPUT-3")
+			&& raw.Contains("LIVE-OUT-0")
+			&& raw.Contains("LIVE-ERR-1")
+			&& raw.Contains("LATE-SHELL-OUTPUT-2")
+			&& raw.Contains("LATE-SHELL-OUTPUT-3"),
+			"Preserve shell chunks that arrive after tool completion in both output views.");
 		Check.Equal(0, errors.Count, "All tool fixtures must be processed: " + string.Join("; ", errors));
 	}
 
