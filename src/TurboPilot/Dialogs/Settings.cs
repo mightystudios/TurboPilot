@@ -45,6 +45,9 @@ public sealed class Settings
 	/// <summary>Model id selected in the Settings dialog, if any.</summary>
 	public string SelectedModel { get; set; } = "";
 
+	/// <summary>Copilot Fusion tier selected in the Settings dialog, if any.</summary>
+	public string SelectedFusionTier { get; set; } = "";
+
 	/// <summary>Context tier selected in the Settings dialog, if any.</summary>
 	public string SelectedContextTier { get; set; } = "";
 

@@ -7,7 +7,7 @@ TurboPilot is a Windows desktop workspace for running AI coding sessions with a 
 1. Choose **Session > Begin Session**.
 2. Select a workspace folder.
 3. Choose **Copilot CLI** or **BYOK (OpenAI-compatible)**.
-4. Choose **Query Service**, select a model, context tier, reasoning effort, and mode, then choose **Begin Session**.
+4. Choose **Query Service**, select a model, its available routing options, and a mode, then choose **Begin Session**.
 5. Write a prompt in **User Prompt** and press **Ctrl+Enter** or choose **Send**.
 
 TurboPilot offers to attach a root `README.md` or `README.txt` the first time a new workspace is opened. Accepting gives the model project context without starting other work.
@@ -99,6 +99,7 @@ For BYOK, enter the host or IP, port, API base path, and optional key. A scheme 
 ### Session options
 
 - **Model** selects a model advertised by the service.
+- **Fusion tier** selects Standard, High, or Max routing when the Copilot Fusion model is selected.
 - **Context** selects an advertised context tier when the service provides choices.
 - **Reasoning effort** selects an advertised effort level.
 - **Mode** selects Standard, Plan, Autopilot, or an enabled custom agent.
@@ -126,6 +127,8 @@ Everything inside the active workspace is in scope. Folder grants add Read, Writ
 - **Save Options** and **Load Options** move a permission set between workspaces.
 
 Permission changes apply to the next operation of a running session.
+
+When `ssh`, `sudo`, or Git asks a command for a password, passphrase, user name, or confirmation, TurboPilot opens a dedicated authentication dialog. The answer goes only to that command and is never written to the transcript or shown to the model.
 
 ## Customization
 

@@ -72,6 +72,8 @@ public sealed partial class ChatService : IAsyncDisposable
 	private string? _deferredTimeoutMessage;
 	private string? _failureMessage;
 	private bool _sessionIdlePending;
+	private Func<ShellAuthenticationRequest, CancellationToken, Task<ShellAuthenticationResponse>>?
+		_shellAuthenticationHandler;
 	private static readonly TimeSpan TurnInterruptDeadline = TimeSpan.FromSeconds(5);
 
 	// Tool calls stay addressable after completion because attached
@@ -213,6 +215,13 @@ public sealed partial class ChatService : IAsyncDisposable
 		get { lock (_sync) return _questions.Count > 0; }
 	}
 
+	internal void SetShellAuthenticationHandler(
+		Func<ShellAuthenticationRequest, CancellationToken, Task<ShellAuthenticationResponse>> handler)
+	{
+		ArgumentNullException.ThrowIfNull(handler);
+		lock (_sync) _shellAuthenticationHandler = handler;
+	}
+
 	// Only a session that received prompts, or holds context not yet sent, has anything to hand off.
 	public bool HasConversation
 	{
@@ -293,6 +302,7 @@ public sealed partial class ChatService : IAsyncDisposable
 			config.OnUserInputRequest = HandleUserInputRequestAsync;
 			config.OnExitPlanModeRequest = HandleExitPlanModeRequestAsync;
 			config.OnAutoModeSwitchRequest = HandleAutoModeSwitchRequestAsync;
+			config.OnShellAuthenticationRequest = HandleShellAuthenticationRequestAsync;
 			config.OnEvent = HandleSessionEvent;
 
 			_client = _createClient(_options);
@@ -394,6 +404,7 @@ public sealed partial class ChatService : IAsyncDisposable
 				Prompt = text,
 				Mode = "immediate",
 				AgentMode = _agentMode,
+				ClientTurnId = "turbopilot-" + Guid.NewGuid().ToString("N"),
 				Attachments = attachmentPaths?.Select(BuildAttachment).ToList(),
 			};
 
@@ -963,6 +974,29 @@ public sealed partial class ChatService : IAsyncDisposable
 		return await AskQuestionAsync(request.Question, choices, acceptFreeformAsAnswer: true);
 	}
 
+	internal async Task<ShellAuthenticationResponse> HandleShellAuthenticationRequestAsync(
+		ShellAuthenticationRequest request,
+		CancellationToken cancellationToken)
+	{
+		Func<ShellAuthenticationRequest, CancellationToken, Task<ShellAuthenticationResponse>>? handler;
+		lock (_sync) handler = _shellAuthenticationHandler;
+		if (handler is null || cancellationToken.IsCancellationRequested)
+			return ShellAuthenticationResponse.Cancel();
+		try
+		{
+			return await handler(request, cancellationToken).ConfigureAwait(false);
+		}
+		catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+		{
+			return ShellAuthenticationResponse.Cancel();
+		}
+		catch (Exception ex) when (ex is not OutOfMemoryException)
+		{
+			ErrorReceived?.Invoke("Cannot answer the shell authentication request: " + ex.Message);
+			return ShellAuthenticationResponse.Cancel();
+		}
+	}
+
 	private async Task<UserInputResponse> AskQuestionAsync(string question, IReadOnlyList<string> choices,
 		bool acceptFreeformAsAnswer)
 	{
@@ -1398,6 +1432,45 @@ public sealed partial class ChatService : IAsyncDisposable
 				"\r\n\r\n" + checklist.Rendered + "\r\n\r\n");
 		}
 	}
+
+	/// <summary>
+	/// Refreshes and displays background agents, workflows, and shell
+	/// commands tracked by the runtime.
+	/// </summary>
+#pragma warning disable GHCP001
+	public async Task ShowBackgroundTasksAsync(CancellationToken cancellationToken = default)
+	{
+		using var linked = CancellationTokenSource.CreateLinkedTokenSource(
+			cancellationToken, _lifetime.Token);
+		try
+		{
+			var session = _session ?? throw new InvalidOperationException("No active session.");
+			await session.Rpc.Tasks.RefreshAsync(linked.Token).ConfigureAwait(false);
+			var listed = await session.Rpc.Tasks.ListAsync(linked.Token).ConfigureAwait(false);
+			var snapshots = new List<BackgroundTaskSnapshot>(listed.Tasks.Count);
+			foreach (var task in listed.Tasks)
+			{
+				GitHub.Copilot.Rpc.TaskProgress? progress = null;
+				if (BackgroundTaskDiagnostics.Id(task) is { Length: > 0 } id)
+					progress = (await session.Rpc.Tasks.GetProgressAsync(id, linked.Token)
+						.ConfigureAwait(false)).Progress;
+				snapshots.Add(new BackgroundTaskSnapshot(task, progress));
+			}
+			var listing = NoticeFormatter.Listing(
+				"Background tasks",
+				BackgroundTaskDiagnostics.Describe(snapshots));
+			AddNotice(listing);
+		}
+		catch (OperationCanceledException) when (linked.IsCancellationRequested)
+		{
+			// Ending the session also ends its diagnostic query.
+		}
+		catch (Exception ex) when (ex is not OutOfMemoryException)
+		{
+			ErrorReceived?.Invoke("Cannot inspect background tasks: " + ex.Message);
+		}
+	}
+#pragma warning restore GHCP001
 
 	/// <summary>
 	/// Prints the tool call that is starting. The row carries the
@@ -1975,14 +2048,20 @@ public sealed partial class ChatService : IAsyncDisposable
 	{
 		var effort = string.IsNullOrWhiteSpace(next.ReasoningEffort) ? null : next.ReasoningEffort;
 		var contextTier = SessionConfiguration.ToSdkContextTier(next.ContextTier);
+		var fusionTier = SessionConfiguration.SupportsFusionTier(next.Model)
+			? SessionConfiguration.ToSdkFusionTier(next.FusionTier)
+			: null;
 #pragma warning disable GHCP001
-		if (next.Model != _options.Model || next.ContextTier != _options.ContextTier)
+		if (next.Model != _options.Model || next.ContextTier != _options.ContextTier
+			|| next.FusionTier != _options.FusionTier)
 		{
-			var switched = await session.Rpc.Model.SwitchToAsync(
-				next.Model,
-				reasoningEffort: effort,
-				contextTier: contextTier,
-				cancellationToken: cancellationToken).ConfigureAwait(false);
+			var switched = await session.Rpc.Model.SwitchToAsync(new GitHub.Copilot.Rpc.ModelSwitchToRequest
+			{
+				ModelId = next.Model,
+				ReasoningEffort = effort,
+				ContextTier = contextTier,
+				FusionTier = fusionTier,
+			}, cancellationToken).ConfigureAwait(false);
 			if (switched.Deferred == true)
 			{
 				lock (_sync) _pendingChanges = next;
@@ -2000,7 +2079,7 @@ public sealed partial class ChatService : IAsyncDisposable
 			_agentMode = mode;
 			_options = _options with
 			{
-				Model = next.Model, ContextTier = next.ContextTier,
+				Model = next.Model, FusionTier = next.FusionTier, ContextTier = next.ContextTier,
 				ReasoningEffort = next.ReasoningEffort, Mode = next.Mode,
 				ContextWindowTokens = next.ContextWindowTokens, LinkFiles = next.LinkFiles,
 			};

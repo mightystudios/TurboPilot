@@ -18,11 +18,15 @@ internal static class SessionOptionsFactory
 		bool applyInstructions,
 		bool preloadSkills,
 		bool linkFiles,
+		string? fusionTier = null,
 		CustomizationLibrary? customizations = null) =>
 		new()
 		{
 			WorkspaceFolder = workspace,
 			Model = model?.Id ?? "",
+			FusionTier = SessionConfiguration.SupportsFusionTier(model?.Id)
+				? string.IsNullOrWhiteSpace(fusionTier) ? "standard" : fusionTier.Trim().ToLowerInvariant()
+				: "",
 			ContextTier = contextTier?.Id ?? "",
 			ContextWindowTokens = contextTier?.ContextWindowTokens
 				?? model?.LargestContextTier?.ContextWindowTokens
@@ -92,6 +96,12 @@ internal static class SessionOptionsFactory
 					?? throw new InvalidOperationException(
 						$"Saved reasoning effort '{settings.SelectedEffort}' is unavailable for model '{model.Id}'.");
 		}
+		var fusionTier = SessionConfiguration.SupportsFusionTier(model.Id)
+			? SessionConfiguration.FusionTiers.FirstOrDefault(tier =>
+				string.Equals(tier.Id, settings.SelectedFusionTier, StringComparison.OrdinalIgnoreCase)).Id
+			: "";
+		if (SessionConfiguration.SupportsFusionTier(model.Id) && string.IsNullOrWhiteSpace(fusionTier))
+			fusionTier = "standard";
 
 		return Create(
 			workspace,
@@ -105,6 +115,7 @@ internal static class SessionOptionsFactory
 			settings.ApplyInstructions,
 			settings.PreloadSkills,
 			settings.LinkFiles,
+			fusionTier,
 			customizations);
 	}
 }

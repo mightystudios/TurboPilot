@@ -16,9 +16,10 @@ namespace TurboPilot.Dialogs;
 /// Session settings dialog: replaces the former New Session folder picker
 /// with the full setup surface. The user picks the workspace folder and the
 /// model hosting service (Copilot CLI or a BYOK OpenAI-compatible server),
-/// queries the service for its models, and chooses the model, context tier,
-/// reasoning effort and session mode. Permissions and Customization dialogs
-/// open from here, and Begin Session drives the session lifecycle.
+/// queries the service for its models, and chooses the model, Fusion tier,
+/// context tier, reasoning effort and session mode. Permissions and
+/// Customization dialogs open from here, and Begin Session drives the
+/// session lifecycle.
 ///
 /// The dialog only queries services; actually starting an AI session is the
 /// caller's job once Begin Session returns true. Cancel (or the close
@@ -55,6 +56,9 @@ public partial class SettingsDialog : TurbolandFloatingDialog
 
 	/// <summary>Selected model id.</summary>
 	public string SelectedModel { get; private set; } = "";
+
+	/// <summary>Selected Copilot Fusion tier (empty for other models).</summary>
+	public string SelectedFusionTier { get; private set; } = "";
 
 	/// <summary>Selected context tier (empty when the provider exposes no tier choice).</summary>
 	public string SelectedContextTier { get; private set; } = "";
@@ -155,6 +159,7 @@ public partial class SettingsDialog : TurbolandFloatingDialog
 			if (!_suppressEvents) UpdateBeginCaption();
 		};
 		comboEffort.SelectionChanged += (_, _) => UpdateBeginCaption();
+		comboFusionTier.SelectionChanged += (_, _) => UpdateBeginCaption();
 		checkApplyInstructions.Click += (_, _) => UpdateBeginCaption();
 		checkPreloadSkills.Click += (_, _) => UpdateBeginCaption();
 		checkLinkFiles.Click += (_, _) => UpdateBeginCaption();
@@ -246,8 +251,11 @@ public partial class SettingsDialog : TurbolandFloatingDialog
 		SetComboItems(comboModel, Array.Empty<string>());
 		SetComboItems(comboContextTier, Array.Empty<string>());
 		SetComboItems(comboEffort, Array.Empty<string>());
+		SetComboItems(comboFusionTier, Array.Empty<string>());
 		labelContextTier.IsEnabled = false;
 		comboContextTier.IsEnabled = false;
+		labelFusionTier.Visibility = Visibility.Collapsed;
+		comboFusionTier.Visibility = Visibility.Collapsed;
 
 		string? endpoint = null;
 		if (IsByok)
@@ -339,6 +347,9 @@ public partial class SettingsDialog : TurbolandFloatingDialog
 			SetComboItems(comboEffort, Array.Empty<string>());
 			labelEffort.IsEnabled = false;
 			comboEffort.IsEnabled = false;
+			SetComboItems(comboFusionTier, Array.Empty<string>());
+			labelFusionTier.Visibility = Visibility.Collapsed;
+			comboFusionTier.Visibility = Visibility.Collapsed;
 			return;
 		}
 
@@ -367,6 +378,29 @@ public partial class SettingsDialog : TurbolandFloatingDialog
 			SetComboItems(comboEffort, Array.Empty<string>());
 			labelEffort.IsEnabled = false;
 			comboEffort.IsEnabled = false;
+		}
+
+		var fusionTiers = FusionTiersFor(model);
+		SetComboItems(comboFusionTier, fusionTiers.Select(tier => tier.Name));
+		if (fusionTiers.Count > 0)
+		{
+			var settings = Settings.Load();
+			var preferred = _currentSession is { } current
+				&& string.Equals(current.Model, model.Id, StringComparison.OrdinalIgnoreCase)
+					? current.FusionTier
+					: string.Equals(settings.SelectedModel, model.Id, StringComparison.OrdinalIgnoreCase)
+						? settings.SelectedFusionTier
+						: "";
+			var selected = Enumerable.Range(0, fusionTiers.Count).FirstOrDefault(index =>
+				string.Equals(fusionTiers[index].Id, preferred, StringComparison.OrdinalIgnoreCase));
+			comboFusionTier.SelectedIndex = selected;
+			labelFusionTier.Visibility = Visibility.Visible;
+			comboFusionTier.Visibility = Visibility.Visible;
+		}
+		else
+		{
+			labelFusionTier.Visibility = Visibility.Collapsed;
+			comboFusionTier.Visibility = Visibility.Collapsed;
 		}
 	}
 
@@ -470,6 +504,11 @@ public partial class SettingsDialog : TurbolandFloatingDialog
 		var contextTier = contextTierIndex >= 0 && contextTierIndex < contextTiers.Count
 			? contextTiers[contextTierIndex]
 			: model?.LargestContextTier;
+		var fusionTiers = model is null ? [] : FusionTiersFor(model);
+		var fusionTierIndex = comboFusionTier.SelectedIndex;
+		var fusionTier = fusionTierIndex >= 0 && fusionTierIndex < fusionTiers.Count
+			? fusionTiers[fusionTierIndex].Id
+			: null;
 		return SessionOptionsFactory.Create(
 			workspace,
 			model,
@@ -481,7 +520,8 @@ public partial class SettingsDialog : TurbolandFloatingDialog
 			textBoxApiKey.Text,
 			checkApplyInstructions.IsChecked == true,
 			checkPreloadSkills.IsChecked == true,
-			checkLinkFiles.IsChecked == true);
+			checkLinkFiles.IsChecked == true,
+			fusionTier);
 	}
 
 	// -- Sibling dialogs ------------------------------------------------------
@@ -541,6 +581,7 @@ public partial class SettingsDialog : TurbolandFloatingDialog
 		ByokEndpoint = next.ByokEndpoint;
 		ByokApiKey = next.ByokApiKey;
 		SelectedModel = next.Model;
+		SelectedFusionTier = next.FusionTier;
 		SelectedContextTier = next.ContextTier;
 		SelectedContextWindowTokens = next.ContextWindowTokens;
 		SelectedEffort = next.ReasoningEffort ?? "";
@@ -582,6 +623,7 @@ public partial class SettingsDialog : TurbolandFloatingDialog
 			settings.ByokEndpoint = endpoint;
 		settings.ByokApiKey = textBoxApiKey.Text.Trim();
 		settings.SelectedModel = SelectedModel;
+		settings.SelectedFusionTier = SelectedFusionTier;
 		settings.SelectedContextTier = SelectedContextTier;
 		settings.SelectedEffort = SelectedEffort;
 		settings.SelectedMode = SelectedMode;
@@ -619,6 +661,11 @@ public partial class SettingsDialog : TurbolandFloatingDialog
 		model.ContextTiers.Count > 0
 			? model.ContextTiers
 			: ModelService.BuildContextTiers(model.ContextWindowTokens);
+
+	private IReadOnlyList<SessionConfiguration.FusionTierOption> FusionTiersFor(AvailableModel model) =>
+		!IsByok && SessionConfiguration.SupportsFusionTier(model.Id)
+			? SessionConfiguration.FusionTiers
+			: [];
 
 	/// <summary>
 	/// Composes host, port, and path into an absolute base URL. Forgiving of

@@ -9,6 +9,7 @@ using System.Windows.Input;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
 using System.Windows.Threading;
+using GitHub.Copilot;
 using Microsoft.Web.WebView2.Wpf;
 using TurboPilot.Attachments;
 using TurboPilot.Ai;
@@ -732,6 +733,8 @@ internal static class UiChecks
 			CheckTools(application, window, workspace);
 			CheckSettingsCaptions(workspace);
 			CheckReasoningEffortDefaults(workspace);
+			CheckFusionTierControls(workspace);
+			CheckShellAuthenticationDialog();
 			CheckPastSessionsLayout(window);
 			CheckPastSessionsDelete(application, window, workspace);
 			CheckCustomizationDiscoveryDialog(application, workspace);
@@ -1727,6 +1730,16 @@ internal static class UiChecks
 		Check.True(Status(window).StartsWith("Ready.."),
 			"A command is answered locally and never starts a turn.");
 
+		before = chat.Transcript.Length;
+		SetInput(window, "/tasks");
+		Click(window, "buttonSend");
+		await Check.UntilAsync(() => chat.Transcript[before..].Contains("Background tasks:"),
+			"The background task command printed nothing.");
+		Check.True(chat.Transcript[before..].Contains("No background tasks are tracked."),
+			"Report an empty runtime task registry plainly.");
+		Check.True(Status(window).StartsWith("Ready.."),
+			"Inspecting background tasks never starts a model turn.");
+
 		input.Document.Blocks.Clear();
 		Console.WriteLine("PASS typed commands: completion list, keys, and local answer without a turn");
 	}
@@ -2458,6 +2471,7 @@ internal static class UiChecks
 				"Reset to the largest context tier when returning to a model.");
 			Console.WriteLine("PASS highest reasoning effort and largest context tier selected on model changes");
 		}
+
 		finally
 		{
 			dialog.Close();
@@ -2465,6 +2479,89 @@ internal static class UiChecks
 
 		static string ContextSize(ComboBox combo) =>
 			(combo.SelectedItem as string)?.Split(" - ").Last() ?? "";
+	}
+
+	private static void CheckFusionTierControls(TestWorkspace workspace)
+	{
+		var models = (IReadOnlyList<AvailableModel>)
+		[
+			new AvailableModel { Id = "fusion", Name = "Copilot Fusion", ContextWindowTokens = 32768 },
+			new AvailableModel { Id = "test-model", ContextWindowTokens = 32768 },
+		];
+		var dialog = new SettingsDialog(workspace.Workspace, null);
+		try
+		{
+			SetField(dialog, "_models", models);
+			var comboModel = Control<ComboBox>(dialog, "comboModel");
+			comboModel.ItemsSource = models.Select(model => model.DisplayLabel).ToArray();
+			var comboFusion = Control<ComboBox>(dialog, "comboFusionTier");
+			var labelFusion = Control<TextBlock>(dialog, "labelFusionTier");
+
+			comboModel.SelectedIndex = 0;
+			Check.True(comboFusion.Visibility == Visibility.Visible
+				&& labelFusion.Visibility == Visibility.Visible
+				&& comboFusion.Items.Count == 3,
+				"Show all Fusion routing tiers only for the Fusion model.");
+			comboFusion.SelectedIndex = 2;
+			var selected = (ChatSessionOptions)Invoke(dialog, "BuildOptions", workspace.Workspace)!;
+			Check.Equal("max", selected.FusionTier, "Build the selected Fusion tier into session options.");
+
+			comboModel.SelectedIndex = 1;
+			Check.True(comboFusion.Visibility == Visibility.Collapsed
+				&& labelFusion.Visibility == Visibility.Collapsed,
+				"Hide Fusion routing for ordinary models.");
+			selected = (ChatSessionOptions)Invoke(dialog, "BuildOptions", workspace.Workspace)!;
+			Check.Equal("", selected.FusionTier, "Do not send a Fusion tier for another model.");
+			Console.WriteLine("PASS Fusion tier controls follow the selected model");
+		}
+		finally
+		{
+			dialog.Close();
+		}
+	}
+
+	private static void CheckShellAuthenticationDialog()
+	{
+		var secret = new ShellAuthenticationDialog(new ShellAuthenticationRequest
+		{
+			Program = "ssh",
+			Prompt = "Passphrase:",
+			InputKind = ShellAuthenticationInputKind.Secret,
+			Command = "ssh host",
+			Cwd = @"C:\work",
+		});
+		try
+		{
+			Check.True(Control<PasswordBox>(secret, "passwordAnswer").Visibility == Visibility.Visible
+				&& Control<TextBox>(secret, "textAnswer").Visibility == Visibility.Collapsed,
+				"Mask secret shell authentication answers.");
+		}
+		finally
+		{
+			secret.Close();
+		}
+
+		var confirm = new ShellAuthenticationDialog(new ShellAuthenticationRequest
+		{
+			Program = "ssh",
+			Prompt = "Trust this host?",
+			InputKind = ShellAuthenticationInputKind.Confirm,
+			Command = "ssh host",
+			Cwd = @"C:\work",
+		});
+		try
+		{
+			Check.Equal("Yes", Control<Button>(confirm, "buttonAccept").Content as string,
+				"Present shell confirmation requests as an explicit Yes action.");
+			Check.True(Control<PasswordBox>(confirm, "passwordAnswer").Visibility == Visibility.Collapsed
+				&& Control<TextBox>(confirm, "textAnswer").Visibility == Visibility.Collapsed,
+				"Do not show an input field for a shell confirmation.");
+			Console.WriteLine("PASS shell authentication dialog masks secrets and handles confirmation");
+		}
+		finally
+		{
+			confirm.Close();
+		}
 	}
 
 	/// <summary>

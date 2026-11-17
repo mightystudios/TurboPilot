@@ -6,6 +6,7 @@ using System.Text.Json;
 using System.Windows;
 using System.Windows.Media;
 using System.Windows.Media.Animation;
+using GitHub.Copilot;
 using TurbolandTheme.Wpf.Controls;
 using TurboPilot.Attachments;
 using TurboPilot.Ai;
@@ -272,6 +273,7 @@ public partial class MainWindow : TurbolandWindow
 		// Both describe a transcript that exists rather than drive the
 		// session, so they stay usable while a turn is running.
 		menuSessionDetails.IsEnabled = active && !_closing;
+		menuBackgroundTasks.IsEnabled = active && !_closing;
 		menuSaveTranscript.IsEnabled = _chat is not null && !_closing;
 		menuCompactContext.IsEnabled = ready && !IsSendingInput;
 		menuResetContext.IsEnabled = ready && !IsSendingInput;
@@ -1953,6 +1955,8 @@ public partial class MainWindow : TurbolandWindow
 
 			var chat = _createChat();
 			_chat = chat;
+			chat.SetShellAuthenticationHandler((request, token) =>
+				ShowShellAuthenticationAsync(chat, request, token));
 			chat.OutputPagesLoaded += pages => ForActiveChat(chat, () => LoadOutputPages(pages, selectNewest: true));
 			chat.OutputPageStarted += pageId => ForActiveChat(chat, () => BeginOutputPage(pageId));
 			chat.RawPageReceived += (pageId, text) =>
@@ -2079,6 +2083,43 @@ public partial class MainWindow : TurbolandWindow
 			}).Task);
 		monitor.Start();
 		_externalAssistantMessages = monitor;
+	}
+
+	private async Task<ShellAuthenticationResponse> ShowShellAuthenticationAsync(
+		ChatService chat,
+		ShellAuthenticationRequest request,
+		CancellationToken cancellationToken)
+	{
+		if (cancellationToken.IsCancellationRequested || !ReferenceEquals(_chat, chat))
+			return ShellAuthenticationResponse.Cancel();
+		if (!Dispatcher.CheckAccess())
+		{
+			try
+			{
+				return await Dispatcher.InvokeAsync(
+					() => ShowShellAuthentication(chat, request, cancellationToken),
+					System.Windows.Threading.DispatcherPriority.Send,
+					cancellationToken).Task.ConfigureAwait(false);
+			}
+			catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+			{
+				return ShellAuthenticationResponse.Cancel();
+			}
+		}
+		return ShowShellAuthentication(chat, request, cancellationToken);
+	}
+
+	private ShellAuthenticationResponse ShowShellAuthentication(
+		ChatService chat,
+		ShellAuthenticationRequest request,
+		CancellationToken cancellationToken)
+	{
+		if (cancellationToken.IsCancellationRequested || !ReferenceEquals(_chat, chat))
+			return ShellAuthenticationResponse.Cancel();
+		var answer = ShellAuthenticationDialog.Ask(this, request, cancellationToken);
+		return answer is null
+			? ShellAuthenticationResponse.Cancel()
+			: ShellAuthenticationResponse.Accept(answer);
 	}
 
 	/// <summary>
@@ -2525,6 +2566,9 @@ public partial class MainWindow : TurbolandWindow
 			case "/details":
 				ShowSessionDetails(chat);
 				break;
+			case "/tasks":
+				await chat.ShowBackgroundTasksAsync();
+				break;
 			case "/save":
 				await SaveTranscriptAsync();
 				break;
@@ -2915,6 +2959,16 @@ public partial class MainWindow : TurbolandWindow
 			return;
 		}
 		ShowSessionDetails(chat);
+	}
+
+	private async void OnBackgroundTasks(object sender, RoutedEventArgs e)
+	{
+		if (_chat is not { } chat)
+		{
+			MessageDialog.Ok(this, "There is no session running to inspect.", "Background Tasks");
+			return;
+		}
+		await chat.ShowBackgroundTasksAsync();
 	}
 
 	private void ShowSessionDetails(ChatService chat)

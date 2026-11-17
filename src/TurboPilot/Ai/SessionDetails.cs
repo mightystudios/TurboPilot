@@ -32,6 +32,8 @@ public static class SessionDetails
 		Field(sb, "Id", sessionId ?? "none");
 		Field(sb, "Workspace", options.WorkspaceFolder ?? "none");
 		Field(sb, "Model", modelLabel is { Length: > 0 } ? modelLabel : Or(options.Model, "default"));
+		if (SessionConfiguration.SupportsFusionTier(options.Model))
+			Field(sb, "Fusion tier", Or(options.FusionTier, "standard"));
 		Field(sb, "Context tier", options.ContextTier switch
 		{
 			AvailableContextTier.DefaultId => "default",

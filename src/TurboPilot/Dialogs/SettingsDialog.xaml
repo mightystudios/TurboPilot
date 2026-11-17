@@ -101,24 +101,32 @@
 							ToolTip="Contact the service and repopulate the model list"/>
                 </Grid>
 
-                <Grid Margin="0,8,0,0" Height="28">
+                <Grid Margin="0,8,0,0">
                     <Grid.ColumnDefinitions>
                         <ColumnDefinition Width="Auto"/>
-                        <ColumnDefinition Width="43*"/>
-                        <ColumnDefinition Width="653*"/>
+                        <ColumnDefinition Width="220"/>
+                        <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="140"/>
                         <ColumnDefinition Width="Auto"/>
                         <ColumnDefinition Width="140"/>
                     </Grid.ColumnDefinitions>
                     <TextBlock x:Name="labelContextTier" Grid.Column="0" Text="Context:" VerticalAlignment="Center"
 							Margin="0,0,8,0"/>
-                    <ComboBox x:Name="comboContextTier"
-							VerticalAlignment="Center"
-							ToolTip="Context tiers reported by the service" Margin="10,0,398,0" Grid.Column="1" Grid.ColumnSpan="2"/>
+                    <ComboBox x:Name="comboContextTier" Grid.Column="1"
+							VerticalAlignment="Center" Margin="0,0,16,0"
+							ToolTip="Context tiers reported by the service"/>
                     <TextBlock x:Name="labelEffort" Grid.Column="2" Text="Reasoning effort:"
-							VerticalAlignment="Center" Margin="289,0,216,0"/>
-                    <ComboBox x:Name="comboEffort" Grid.Column="2"
+							VerticalAlignment="Center" Margin="0,0,8,0"/>
+                    <ComboBox x:Name="comboEffort" Grid.Column="3"
+							VerticalAlignment="Center" Margin="0,0,16,0"
+							ToolTip="Reasoning effort levels reported by the service"/>
+                    <TextBlock x:Name="labelFusionTier" Grid.Column="4" Text="Fusion tier:"
+							VerticalAlignment="Center" Margin="0,0,8,0"
+							Visibility="Collapsed"/>
+                    <ComboBox x:Name="comboFusionTier" Grid.Column="5"
 							VerticalAlignment="Center"
-							ToolTip="Reasoning effort levels reported by the service" Margin="454,0,19,0"/>
+							ToolTip="Routing tier for the Copilot Fusion model"
+							Visibility="Collapsed"/>
                 </Grid>
 
                 <TextBlock x:Name="textQueryStatus" Margin="0,8,0,0" TextWrapping="Wrap"

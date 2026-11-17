@@ -93,6 +93,11 @@ internal static class RuntimeChecks
 				"Send the central presentation instructions alongside enabled customizations.");
 			Check.True(!request.Contains("DISABLED_INSTRUCTION_SENTINEL") && !request.Contains("DISABLED_SKILL_SENTINEL"), "Exclude disabled content from the actual request.");
 			Check.True(!request.Contains("UNSELECTED_WORKSPACE_INSTRUCTION_SENTINEL"), "Disable implicit workspace instruction loading.");
+			var userMessage = (await runtime.GetEventsAsync())
+				.OfType<UserMessageEvent>()
+				.Last(message => message.Data.Content.Contains("first prompt marker", StringComparison.Ordinal));
+			Check.True(userMessage.Data.ClientTurnId?.StartsWith("turbopilot-", StringComparison.Ordinal) == true,
+				"Stamp each user send with a persisted TurboPilot client turn id.");
 			Check.True(chat.Transcript.Contains("**You:** first prompt marker"), "Preserve the user's original prompt.");
 			Check.True(!chat.Transcript.Contains("kp-user-prompt")
 				&& chat.RenderedTranscript.Contains("<!--kp-user-prompt-start-->")
@@ -208,8 +213,17 @@ internal static class RuntimeChecks
 			try
 			{
 				Check.True(toolNames.Contains("powershell"), "The Windows shell tool must be present.");
+				var probePath = Path.Combine(workspace.Workspace, "permission-probe.txt");
+				var quotedProbePath = probePath.Replace("'", "''", StringComparison.Ordinal);
+				var probeCommand = $"Set-Content -LiteralPath '{quotedProbePath}' -Value TurboPilotPermissionProbe; "
+					+ $"Get-Content -LiteralPath '{quotedProbePath}'";
+				var probeArguments = JsonSerializer.Serialize(new
+				{
+					command = probeCommand,
+					description = "Write a fixture marker",
+				});
 				provider.Replies.Enqueue(new LocalProvider.Reply("", ToolName: "powershell",
-					ToolArguments: """{"command":"Write-Output TurboPilotPermissionProbe","description":"Write a fixture marker"}"""));
+					ToolArguments: probeArguments));
 				provider.Replies.Enqueue(new LocalProvider.Reply("Read-only feedback accepted."));
 				await resumed.SendAsync("request a shell permission");
 				await Check.UntilAsync(() => resumed.HasPendingQuestion, "The permission request did not wait for the user.");
@@ -223,7 +237,7 @@ internal static class RuntimeChecks
 
 				scopes[scopeKey].Operations = ["shell"];
 				provider.Replies.Enqueue(new LocalProvider.Reply("", ToolName: "powershell",
-					ToolArguments: """{"command":"Write-Output TurboPilotPermissionProbe","description":"Write a fixture marker"}"""));
+					ToolArguments: probeArguments));
 				provider.Replies.Enqueue(new LocalProvider.Reply("Live permission applied."));
 				await SendAndWaitAsync(resumed, "use the newly approved shell operation");
 				Check.True(!resumed.HasPendingQuestion, "Live permission changes must not require a restart.");
@@ -234,7 +248,7 @@ internal static class RuntimeChecks
 				// The transcript has to say what the tool did, not merely
 				// that one ran. A denied call and an approved call both
 				// leave a card, and each says how it ended.
-				Check.True(resumed.Transcript.Contains("[tool] powershell  Write-Output TurboPilotPermissionProbe"),
+				Check.True(resumed.Transcript.Contains("[tool] powershell  Set-Content"),
 					"Name the command a shell tool ran, not just the tool: " + resumed.Transcript);
 				Check.True(resumed.Transcript.Contains("[tool result]\r\nTurboPilotPermissionProbe"),
 					"Keep the complete tool result in the Raw transcript: " + resumed.Transcript);

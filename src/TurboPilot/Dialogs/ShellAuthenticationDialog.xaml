@@ -1,0 +1,34 @@
+<ctl:TurbolandFloatingDialog
+	xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+	xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+	xmlns:ctl="clr-namespace:TurbolandTheme.Wpf.Controls;assembly=TurbolandTheme.Wpf"
+	x:Class="TurboPilot.Dialogs.ShellAuthenticationDialog"
+	Title="SHELL AUTHENTICATION"
+	Loaded="OnLoaded">
+
+	<StackPanel MinWidth="420" MaxWidth="620">
+		<TextBlock x:Name="textContext" TextWrapping="Wrap"
+				Margin="0,0,0,8"/>
+		<TextBlock x:Name="textPrompt" TextWrapping="Wrap"
+				Margin="0,0,0,8"/>
+		<TextBlock x:Name="textCommand" TextWrapping="Wrap"
+				FontFamily="Consolas"
+				Margin="0,0,0,12"/>
+
+		<TextBox x:Name="textAnswer"
+				Visibility="Collapsed"
+				Margin="0,0,0,18"/>
+		<PasswordBox x:Name="passwordAnswer"
+				Visibility="Collapsed"
+				Margin="0,0,0,18"/>
+
+		<StackPanel Orientation="Horizontal" HorizontalAlignment="Center">
+			<Button x:Name="buttonAccept" Content="Submit" IsDefault="True"
+					Click="OnAccept"
+					Margin="{DynamicResource Turboland.Size.ButtonStripMargin}"/>
+			<Button x:Name="buttonCancel" Content="Cancel" IsCancel="True"
+					Click="OnCancel"
+					Margin="{DynamicResource Turboland.Size.ButtonStripMargin}"/>
+		</StackPanel>
+	</StackPanel>
+</ctl:TurbolandFloatingDialog>

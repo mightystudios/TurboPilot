@@ -8,9 +8,24 @@ namespace TurboPilot.Ai;
 
 internal static class SessionConfiguration
 {
+	internal readonly record struct FusionTierOption(string Id, string Name);
+
+	internal static IReadOnlyList<FusionTierOption> FusionTiers { get; } =
+	[
+		new("standard", "Standard"),
+		new("high", "High"),
+		new("max", "Max"),
+	];
+
 	public static void Apply(SessionConfigBase config, ChatSessionOptions options, string? applicationInstructionsPath = null)
 	{
 		config.Model = string.IsNullOrWhiteSpace(options.Model) ? null : options.Model;
+#pragma warning disable GHCP001
+		var fusionTier = options.UseByok || !SupportsFusionTier(options.Model)
+			? null
+			: ToSdkFusionTier(options.FusionTier);
+		config.Capi = fusionTier is null ? null : new CapiSessionOptions { FusionTier = fusionTier };
+#pragma warning restore GHCP001
 		config.ContextTier = options.UseByok ? null : ToSdkContextTier(options.ContextTier);
 		config.ReasoningEffort = string.IsNullOrWhiteSpace(options.ReasoningEffort) ? null : options.ReasoningEffort;
 		config.WorkingDirectory = options.WorkspaceFolder;
@@ -116,6 +131,21 @@ internal static class SessionConfiguration
 		AvailableContextTier.LongContextId => ContextTier.LongContext,
 		_ => throw new InvalidOperationException($"Context tier '{contextTier}' is unavailable."),
 	};
+
+	internal static bool SupportsFusionTier(string? model) =>
+		string.Equals(model, "fusion", StringComparison.OrdinalIgnoreCase);
+
+#pragma warning disable GHCP001
+	internal static GitHub.Copilot.Rpc.FusionTier? ToSdkFusionTier(string? fusionTier) =>
+		fusionTier?.Trim().ToLowerInvariant() switch
+	{
+		null or "" => null,
+		"standard" => GitHub.Copilot.Rpc.FusionTier.Standard,
+		"high" => GitHub.Copilot.Rpc.FusionTier.High,
+		"max" => GitHub.Copilot.Rpc.FusionTier.Max,
+		_ => throw new InvalidOperationException($"Fusion tier '{fusionTier}' is unavailable."),
+	};
+#pragma warning restore GHCP001
 
 	private static CustomAgentConfig ReadAgent(CustomizationItem item, HashSet<string> enabledSkills)
 	{

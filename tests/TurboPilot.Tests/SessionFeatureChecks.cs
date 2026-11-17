@@ -1,4 +1,5 @@
 using System.IO;
+using System.Text.Json;
 using GitHub.Copilot;
 using TurboPilot.Ai;
 using TurboPilot.Permissions;
@@ -88,6 +89,8 @@ internal static class SessionFeatureChecks
 			options with { UseByok = false, ContextTier = AvailableContextTier.LongContextId, ContextWindowTokens = 922000 }),
 			"Change a Copilot context tier live");
 		Check.Equal(SessionChange.Live, SessionChanges.Classify(options, options with { ReasoningEffort = "low" }), "Change the effort live");
+		Check.Equal(SessionChange.Live, SessionChanges.Classify(options with { Model = "fusion", FusionTier = "standard" },
+			options with { Model = "fusion", FusionTier = "max" }), "Change the Fusion tier live");
 		Check.Equal(SessionChange.Live, SessionChanges.Classify(options, options with { Mode = "Plan" }), "Change a built-in mode live");
 		Check.Equal(SessionChange.Live, SessionChanges.Classify(options, options with { LinkFiles = false }), "Toggle file links live");
 		Check.Equal(SessionChange.Restart, SessionChanges.Classify(options, options with { Mode = "Writer" }), "A custom agent needs a new session");
@@ -422,8 +425,16 @@ internal static class SessionFeatureChecks
 		{
 			await using var turn = workspace.CreateChat();
 			await turn.StartAsync(options);
+			var probePath = Path.Combine(workspace.Workspace, "agentic-link-probe.txt");
+			var quotedProbePath = probePath.Replace("'", "''", StringComparison.Ordinal);
+			var probeArguments = JsonSerializer.Serialize(new
+			{
+				command = $"Set-Content -LiteralPath '{quotedProbePath}' -Value ToolProbe; "
+					+ $"Get-Content -LiteralPath '{quotedProbePath}'",
+				description = "Write a fixture marker",
+			});
 			provider.Replies.Enqueue(new LocalProvider.Reply("Checking `README.md` before answering.", ToolName: "powershell",
-				ToolArguments: """{"command":"Write-Output ToolProbe","description":"Write a fixture marker"}"""));
+				ToolArguments: probeArguments));
 			provider.Replies.Enqueue(new LocalProvider.Reply("", ToolName: "ask_user",
 				ToolArguments: """{"question":"Which summary style?","choices":["short","long"],"allowFreeform":false}"""));
 			provider.Replies.Enqueue(new LocalProvider.Reply("Results\r\n\r\nSee `README.md`."));

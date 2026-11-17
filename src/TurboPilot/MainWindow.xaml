@@ -69,6 +69,7 @@
                 <MenuItem x:Name="menuNewSession" Header="_Begin Session..." Click="OnNewSession"/>
                 <MenuItem x:Name="menuPastSessions" Header="_Past Sessions..." Click="OnPastSessions"/>
                 <MenuItem x:Name="menuSessionDetails" Header="Session _Details" Click="OnSessionDetails"/>
+                <MenuItem x:Name="menuBackgroundTasks" Header="Background _Tasks" Click="OnBackgroundTasks"/>
                 <Separator/>
                 <!-- Saves what is on screen, not a re-render: the HTML is
                      the live Rendered document with its styling inlined, so

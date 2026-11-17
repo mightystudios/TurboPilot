@@ -37,6 +37,7 @@ internal static class CoreChecks
 		CheckShortText();
 		CheckArchiveLine();
 		CheckSlashCommands();
+		CheckBackgroundTaskDiagnostics();
 		CheckPromptReferences();
 		CheckSessionDetails();
 		CheckWorkspaceChanges();
@@ -844,6 +845,55 @@ internal static class CoreChecks
 			"A listing keeps its columns in a pre block and escapes what it shows.");
 	}
 
+	private static void CheckBackgroundTaskDiagnostics()
+	{
+		var started = DateTimeOffset.UtcNow.AddMinutes(-2);
+		var snapshots = new BackgroundTaskSnapshot[]
+		{
+			new(
+				new GitHub.Copilot.Rpc.TaskInfoShell
+				{
+					Id = "build-shell",
+					Command = "dotnet build",
+					Description = "Build solution",
+					AttachmentMode = GitHub.Copilot.Rpc.TaskShellInfoAttachmentMode.Attached,
+					StartedAt = started,
+					Status = GitHub.Copilot.Rpc.TaskStatus.Running,
+				},
+				new GitHub.Copilot.Rpc.TaskProgressShell
+				{
+					Pid = 42,
+					RecentOutput = "Compiling TurboPilot",
+				}),
+			new(
+				new GitHub.Copilot.Rpc.TaskInfoAgent
+				{
+					Id = "review-agent",
+					AgentType = "code-review",
+					Description = "Review the implementation",
+					DisplayName = "Review changes",
+					Prompt = "Review changes.",
+					StartedAt = started.AddSeconds(1),
+					Status = GitHub.Copilot.Rpc.TaskStatus.Idle,
+					ToolCallId = "tool-review",
+				},
+				new GitHub.Copilot.Rpc.TaskProgressAgent
+				{
+					LatestIntent = "Checking event handling",
+					RecentActivity = [],
+				}),
+		};
+
+		var text = BackgroundTaskDiagnostics.Describe(snapshots);
+		Check.True(text.Contains("build-shell  shell  running")
+			&& text.Contains("Compiling TurboPilot")
+			&& text.Contains("review-agent  agent  idle")
+			&& text.Contains("Checking event handling"),
+			"Describe tracked shell and agent progress for the diagnostics listing.");
+		Check.Equal("No background tasks are tracked.", BackgroundTaskDiagnostics.Describe([]),
+			"Say plainly when the runtime tracks no background work.");
+	}
+
 	private static void CheckPromptReferences()
 	{
 		var attachment = @"C:\work\reference.txt";
@@ -921,7 +971,8 @@ internal static class CoreChecks
 		var options = new ChatSessionOptions
 		{
 			WorkspaceFolder = @"C:\work",
-			Model = "a-model",
+			Model = "fusion",
+			FusionTier = "max",
 			ContextTier = AvailableContextTier.LongContextId,
 			ContextWindowTokens = 922000,
 			Mode = "duck",
@@ -934,6 +985,8 @@ internal static class CoreChecks
 		Check.True(text.Contains("Context tier") && text.Contains("long")
 			&& text.Contains("922,000 tokens"),
 			"The listing must name the selected context tier and its budget.");
+		Check.True(text.Contains("Fusion tier") && text.Contains("max"),
+			"The listing must name the active Fusion routing tier.");
 		Check.True(text.Contains("house-style") && text.Contains(@"C:\kit\a.instructions.md"),
 			"An instruction must be named with the file it came from");
 		Check.True(text.Contains("pdf") && !text.Contains("unused"),
@@ -967,7 +1020,8 @@ internal static class CoreChecks
 		var options = new ChatSessionOptions
 		{
 			WorkspaceFolder = workspace.Workspace,
-			Model = "test-model",
+			Model = "fusion",
+			FusionTier = "high",
 			ContextTier = AvailableContextTier.LongContextId,
 			ReasoningEffort = "high",
 			Mode = "writer.agent",
@@ -993,6 +1047,8 @@ internal static class CoreChecks
 		Check.Equal(1, config.CustomAgents[0].Skills!.Count, "Agents cannot preload disabled skills");
 		Check.Equal("high", config.ReasoningEffort, "Apply reasoning effort");
 		Check.Equal(ContextTier.LongContext, config.ContextTier, "Apply the selected context tier");
+		Check.Equal(GitHub.Copilot.Rpc.FusionTier.High, config.Capi?.FusionTier,
+			"Apply the selected Copilot Fusion tier.");
 		Check.Equal(1, config.McpServers!.Count, "Only enabled servers may be started");
 		Check.Equal("*", config.McpServers["enabled"].Tools!.Single(), "Register all tools explicitly when no server filter is supplied");
 		Check.Equal(0, McpConfig.ReadServerConfiguration(serverFile, "no-tools").Tools!.Count, "Preserve an explicit empty server tool filter");
@@ -1495,6 +1551,41 @@ internal static class CoreChecks
 			"Leave custom auto-switch text available for the normal prompt path.");
 		chat.TryAnswerPending("3");
 		Check.Equal(AutoModeSwitchResponse.No, await switchMode, "Keep explicit automatic-switch choices working.");
+		var beforeAuthentication = chat.Transcript;
+		var canceledAuthentication = await chat.HandleShellAuthenticationRequestAsync(
+			new ShellAuthenticationRequest
+			{
+				SessionId = "session",
+				RequestId = "auth-1",
+				Program = "ssh",
+				Prompt = "Passphrase:",
+				InputKind = ShellAuthenticationInputKind.Secret,
+				Command = "ssh host",
+				Cwd = @"C:\work",
+			},
+			CancellationToken.None);
+		Check.Equal(ShellAuthenticationResponseAction.Cancel, canceledAuthentication.Action,
+			"Cancel shell authentication when no UI handler is registered.");
+		chat.SetShellAuthenticationHandler((_, _) =>
+			Task.FromResult(ShellAuthenticationResponse.Accept("secret-value")));
+		var acceptedAuthentication = await chat.HandleShellAuthenticationRequestAsync(
+			new ShellAuthenticationRequest
+			{
+				SessionId = "session",
+				RequestId = "auth-2",
+				Program = "ssh",
+				Prompt = "Passphrase:",
+				InputKind = ShellAuthenticationInputKind.Secret,
+				Command = "ssh host",
+				Cwd = @"C:\work",
+			},
+			CancellationToken.None);
+		Check.Equal(ShellAuthenticationResponseAction.Accept, acceptedAuthentication.Action,
+			"Forward a shell authentication answer to the requesting process.");
+		Check.Equal("secret-value", acceptedAuthentication.Value,
+			"Preserve the exact shell authentication answer.");
+		Check.Equal(beforeAuthentication, chat.Transcript,
+			"Never write shell authentication prompts or answers to the transcript.");
 		var canceled = chat.HandleUserInputRequestAsync(new UserInputRequest { Question = "Canceled?" }, new());
 		await chat.DisposeAsync();
 		Check.Equal("(user canceled)", (await canceled).Answer, "Disposal must release question handlers");
